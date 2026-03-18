@@ -10,6 +10,7 @@ struct ConnectedCard: Identifiable, Equatable {
     let totalSpace: Int64
     let freeSpace: Int64
     var isTrusted: Bool
+    var selectedSourcePaths: [String] = [] // NEW: support multiple sources
 }
 
 struct BackupLog: Identifiable, Codable {
@@ -43,6 +44,12 @@ class BackupManager: ObservableObject {
             }
         }
     }
+    @Published var etaText: String = ""
+    private var currentProcess: Process?
+    private let sourcePathsKey = "deviceSourcePaths"
+    private let ignoredDevicesKey = "ignoredDeviceIDs"
+    private var ignoredDeviceIDs: Set<String> = []
+    
     @Published var currentActionTextKey = "ready"
     
     @Published var progressPercent: Double = 0.0
@@ -82,6 +89,9 @@ class BackupManager: ObservableObject {
         if let data = UserDefaults.standard.array(forKey: trustedDevicesKey) as? [String] {
             trustedDeviceIDs = Set(data)
         }
+        if let data = UserDefaults.standard.array(forKey: ignoredDevicesKey) as? [String] {
+            ignoredDeviceIDs = Set(data)
+        }
     }
     
     func toggleTrust(for url: URL) {
@@ -94,12 +104,47 @@ class BackupManager: ObservableObject {
             }
             UserDefaults.standard.set(Array(self.trustedDeviceIDs), forKey: self.trustedDevicesKey)
             
-            // 更新对应卡片状态
+            // 更新对应卡片状态 (使用全局通知或重置数组触发)
             if let idx = self.connectedCards.firstIndex(where: { $0.url == url }) {
                 self.connectedCards[idx].isTrusted = self.trustedDeviceIDs.contains(deviceID)
+                // 强制触发 UI 刷新
+                let updatedCard = self.connectedCards[idx]
+                self.connectedCards.remove(at: idx)
+                self.connectedCards.insert(updatedCard, at: idx)
+                
                 self.dummyTrigger.toggle()
             }
         }
+    }
+    
+    func saveSourcePaths(for card: ConnectedCard) {
+        let deviceID = card.url.lastPathComponent
+        var dict = UserDefaults.standard.dictionary(forKey: sourcePathsKey) as? [String: [String]] ?? [:]
+        dict[deviceID] = card.selectedSourcePaths
+        UserDefaults.standard.set(dict, forKey: sourcePathsKey)
+    }
+    
+    func resetAllSettings() {
+        let identifier = Bundle.main.bundleIdentifier ?? "SDBackupApp"
+        UserDefaults.standard.removePersistentDomain(forName: identifier)
+        UserDefaults.standard.synchronize()
+        
+        DispatchQueue.main.async {
+            self.connectedCards = []
+            self.trustedDeviceIDs = []
+            self.ignoredDeviceIDs = []
+            self.backupHistory = []
+            self.loadTrustedDevices()
+            self.checkExistingVolumes()
+            self.dummyTrigger.toggle()
+        }
+    }
+    
+    func ignoreDevice(for url: URL) {
+        let deviceID = url.lastPathComponent
+        ignoredDeviceIDs.insert(deviceID)
+        UserDefaults.standard.set(Array(ignoredDeviceIDs), forKey: ignoredDevicesKey)
+        removeCard(url: url)
     }
     
     func addLog(_ log: BackupLog) {
@@ -114,8 +159,13 @@ class BackupManager: ObservableObject {
     
     func manualBackupAll() {
         for card in connectedCards {
-            let dcimURL = card.url.appendingPathComponent("DCIM")
-            startBackupProcess(volumeURL: card.url, dcimURL: dcimURL)
+            if card.selectedSourcePaths.isEmpty {
+                let dcimURL = card.url.appendingPathComponent("DCIM")
+                startBackupProcess(volumeURL: card.url, sourceURLs: [dcimURL])
+            } else {
+                let urls = card.selectedSourcePaths.map { URL(fileURLWithPath: $0) }
+                startBackupProcess(volumeURL: card.url, sourceURLs: urls)
+            }
         }
     }
     
@@ -129,7 +179,22 @@ class BackupManager: ObservableObject {
             }
             // 稍等一秒后从 UI 移除
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                self.connectedCards.removeAll { $0.url == url }
+                self.removeCard(url: url)
+            }
+        }
+    }
+    
+    func removeCard(url: URL) {
+        connectedCards.removeAll { $0.url == url }
+    }
+    
+    func cancelTransfer() {
+        if let proc = currentProcess, proc.isRunning {
+            proc.terminate()
+            DispatchQueue.main.async {
+                self.isWorking = false
+                self.progressDetailText = "已中断"
+                self.etaText = ""
             }
         }
     }
@@ -138,9 +203,7 @@ class BackupManager: ObservableObject {
         let keys: [URLResourceKey] = [.volumeNameKey, .volumeLocalizedFormatDescriptionKey, .volumeTotalCapacityKey, .volumeAvailableCapacityKey]
         if let urls = FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: keys, options: [.skipHiddenVolumes]) {
             for url in urls {
-                let dcimURL = url.appendingPathComponent("DCIM")
-                var isDir: ObjCBool = false
-                if FileManager.default.fileExists(atPath: dcimURL.path, isDirectory: &isDir), isDir.boolValue {
+                if isPotentialMemoryCard(at: url) {
                     addCard(url: url)
                 }
             }
@@ -154,29 +217,41 @@ class BackupManager: ObservableObject {
         var total: Int64 = 0
         var free: Int64 = 0
         
-        if let r = try? url.resourceValues(forKeys: Set(keys)) {
-            if let vn = r.volumeName { name = vn }
-            if let fmt = r.volumeLocalizedFormatDescription { format = fmt }
-            if let cap = r.volumeTotalCapacity { total = Int64(cap) }
-            if let avail = r.volumeAvailableCapacity { free = Int64(avail) }
+        if Set(keys).isSubset(of: [.volumeNameKey, .volumeLocalizedFormatDescriptionKey, .volumeTotalCapacityKey, .volumeAvailableCapacityKey]) {
+            if let r = try? url.resourceValues(forKeys: [.volumeNameKey, .volumeLocalizedFormatDescriptionKey, .volumeTotalCapacityKey, .volumeAvailableCapacityKey]) {
+                if let vn = r.volumeName { name = vn }
+                if let fmt = r.volumeLocalizedFormatDescription { 
+                    format = fmt.replacingOccurrences(of: " (Encrypted)", with: "", options: .caseInsensitive).replacingOccurrences(of: "（已加密）", with: "") 
+                }
+                if let cap = r.volumeTotalCapacity { total = Int64(cap) }
+                if let avail = r.volumeAvailableCapacity { free = Int64(avail) }
+            }
+        } else {
+            if let r = try? url.resourceValues(forKeys: Set(keys)) {
+                if let vn = r.volumeName { name = vn }
+                if let fmt = r.volumeLocalizedFormatDescription { 
+                    format = fmt.replacingOccurrences(of: " (Encrypted)", with: "", options: .caseInsensitive).replacingOccurrences(of: "（已加密）", with: "") 
+                }
+                if let cap = r.volumeTotalCapacity { total = Int64(cap) }
+                if let avail = r.volumeAvailableCapacity { free = Int64(avail) }
+            }
         }
         
         let deviceID = url.lastPathComponent
         let isTrusted = trustedDeviceIDs.contains(deviceID)
         
-        let card = ConnectedCard(url: url, name: name, format: format, totalSpace: total, freeSpace: free, isTrusted: isTrusted)
+        // 加载记忆的源路径
+        var savedSources: [String] = []
+        if let dict = UserDefaults.standard.dictionary(forKey: sourcePathsKey) as? [String: [String]], let paths = dict[deviceID] {
+            savedSources = paths
+        }
+        
+        let card = ConnectedCard(url: url, name: name, format: format, totalSpace: total, freeSpace: free, isTrusted: isTrusted, selectedSourcePaths: savedSources)
         DispatchQueue.main.async {
             if !self.connectedCards.contains(where: { $0.url == url }) {
                 self.connectedCards.append(card)
                 self.dummyTrigger.toggle()
             }
-        }
-    }
-    
-    private func removeCard(url: URL) {
-        DispatchQueue.main.async {
-            self.connectedCards.removeAll { $0.url == url }
-            self.dummyTrigger.toggle()
         }
     }
     
@@ -199,27 +274,115 @@ class BackupManager: ObservableObject {
         }
     }
     
-    private func handleMountEvent(volumeURL: URL) {
-        let dcimURL = volumeURL.appendingPathComponent("DCIM")
-        var isDir: ObjCBool = false
-        let isSDCard = FileManager.default.fileExists(atPath: dcimURL.path, isDirectory: &isDir) && isDir.boolValue
+    private func isPotentialMemoryCard(at url: URL) -> Bool {
+        // 1. 基本排除：根分区、系统分区、已忽略的设备
+        if url.path == "/" || url.path == "/System/Volumes/Data" { return false }
+        let deviceID = url.lastPathComponent
+        if ignoredDeviceIDs.contains(deviceID) { return false }
         
-        if isSDCard {
-            addCard(url: volumeURL)
+        let keys: [URLResourceKey] = [.volumeIsInternalKey, .volumeIsEjectableKey, .volumeIsRemovableKey, .volumeNameKey, .volumeTotalCapacityKey, .volumeLocalizedFormatDescriptionKey]
+        guard let values = try? url.resourceValues(forKeys: Set(keys)) else {
+            print("DEBUG: Failed to get resource values for \(url.path)")
+            return false
+        }
+        
+        let isInternal = values.volumeIsInternal ?? true
+        let isEjectable = values.volumeIsEjectable ?? false
+        let isRemovable = values.volumeIsRemovable ?? false
+        let name = values.volumeName ?? url.lastPathComponent
+        let totalCapacity = Int64(values.volumeTotalCapacity ?? 0)
+        let format = values.volumeLocalizedFormatDescription ?? ""
+        
+        print("DEBUG: Checking volume: \(name) [\(url.path)] | Internal: \(isInternal) | Ejectable: \(isEjectable) | Removable: \(isRemovable) | Cap: \(totalCapacity / 1_000_000_000) GB | Format: \(format)")
+        
+        // 2. 强力排除规则：内置硬盘直接过滤
+        if isInternal && url.path == "/" { return false }
+        
+        // 3. 排除明确的备份盘和 Time Machine
+        let lowerName = name.lowercased()
+        if lowerName.contains("time machine") || lowerName.contains("backup") || lowerName.contains("tm-") || lowerName.contains("time-machine") {
+            print("DEBUG: Skipping backup drive by name: \(name)")
+            return false
+        }
+        
+        // 4. 文件系统判定：SD 卡通常为 ExFAT 或 FAT32。APFS/HFS+ 通常是移动硬盘或系统盘。
+        let lowerFormat = format.lowercased()
+        let isAppleFormat = lowerFormat.contains("apfs") || lowerFormat.contains("mac os extended") || lowerFormat.contains("hfs")
+        
+        // 5. 核心判定规则 A：物理可移除介质 (USB 读卡器里的 SD/CF 卡) -> 允许
+        if isRemovable && isEjectable { return true }
+        
+        // 6. 核心判定规则 B：对于非 Removable 但 Ejectable 的设备 (雷电读卡器、移动 SSD)
+        if isEjectable {
+            // 如果是苹果专有格式 (APFS/HFS) 且没有 Removable 标记，绝大概率是移动硬盘
+            if isAppleFormat {
+                // 除非极其明确有相机文件夹，否则视为硬盘排除
+                let cameraPaths = ["DCIM", "PRIVATE", "VIDEO", "CLIP", "AVCHD"]
+                for p in cameraPaths {
+                    if FileManager.default.fileExists(atPath: url.appendingPathComponent(p).path) {
+                        return true
+                    }
+                }
+                print("DEBUG: Skipping Apple-formatted external drive without camera folders: \(name)")
+                return false
+            }
+            
+            // 容量判定 (摄影存储卡通常不会超过 1TB)
+            let oneTera: Int64 = 1_100_000_000_000 
+            if totalCapacity > oneTera {
+                // 同上，除非有相机目录
+                let cameraPaths = ["DCIM", "PRIVATE", "VIDEO", "CLIP", "AVCHD"]
+                for p in cameraPaths {
+                    if FileManager.default.fileExists(atPath: url.appendingPathComponent(p).path) {
+                        return true
+                    }
+                }
+                print("DEBUG: Skipping large external drive (>1TB) without camera folders: \(name)")
+                return false
+            }
+            
+            return true
+        }
+        
+        // 兜底判定
+        if url.path.hasPrefix("/Volumes/") && !isAppleFormat {
+            return true
+        }
+        
+        return false
+    }
+    
+    private func handleMountEvent(volumeURL: URL) {
+        if isPotentialMemoryCard(at: volumeURL) {
+            self.addCard(url: volumeURL)
+            
+            let userDefaults = UserDefaults.standard
+            if userDefaults.object(forKey: "autoBackupOnMount") == nil {
+                userDefaults.set(true, forKey: "autoBackupOnMount")
+            }
+            let isAutoBackup = userDefaults.bool(forKey: "autoBackupOnMount")
+            let isTrusted = trustedDeviceIDs.contains(volumeURL.lastPathComponent)
+            
+            if isAutoBackup && isTrusted {
+                if let idx = self.connectedCards.firstIndex(where: { $0.url == volumeURL }), !self.connectedCards[idx].selectedSourcePaths.isEmpty {
+                    let urls = self.connectedCards[idx].selectedSourcePaths.map { URL(fileURLWithPath: $0) }
+                    startBackupProcess(volumeURL: volumeURL, sourceURLs: urls)
+                } else {
+                    let dcimURL = volumeURL.appendingPathComponent("DCIM")
+                    var isDir: ObjCBool = false
+                    if FileManager.default.fileExists(atPath: dcimURL.path, isDirectory: &isDir) && isDir.boolValue {
+                        startBackupProcess(volumeURL: volumeURL, sourceURLs: [dcimURL])
+                    }
+                }
+            }
+            // Silent migrate fallback on target mount check...
         }
         
         let userDefaults = UserDefaults.standard
         if userDefaults.object(forKey: "autoBackupOnMount") == nil {
             userDefaults.set(true, forKey: "autoBackupOnMount")
         }
-        let isAutoBackup = userDefaults.bool(forKey: "autoBackupOnMount")
         let shouldMigrateFallback = userDefaults.bool(forKey: "autoMigrateFallback")
-        
-        let isTrusted = trustedDeviceIDs.contains(volumeURL.lastPathComponent)
-        
-        if isSDCard && isAutoBackup && isTrusted {
-            startBackupProcess(volumeURL: volumeURL, dcimURL: dcimURL)
-        }
         
         if shouldMigrateFallback {
             tryFallbackSync()
@@ -240,7 +403,7 @@ class BackupManager: ObservableObject {
                 let hasFilesToSync = !contents.filter { $0 != ".DS_Store" }.isEmpty
                 if hasFilesToSync {
                     print("Migrating fallback local backup to target drive...")
-                    self.runRsync(source: fallbackPath, destination: targetPath, actionNameKey: "migrating", sourceName: "Fallback Cache", isMigrating: true, sourceVolumeURL: nil)
+                    self.runRsync(sources: [fallbackPath], destination: targetPath, actionNameKey: "migrating", sourceName: "Fallback Cache", isMigrating: true, sourceVolumeURL: nil)
                 }
             }
         }
@@ -259,35 +422,33 @@ class BackupManager: ObservableObject {
         return fallbackPath
     }
     
-    private func startBackupProcess(volumeURL: URL, dcimURL: URL) {
+    private func startBackupProcess(volumeURL: URL, sourceURLs: [URL]) {
         let targetPath = UserDefaults.standard.string(forKey: "targetBackupPath") ?? ""
         let isTargetAvailable = !targetPath.isEmpty && FileManager.default.fileExists(atPath: targetPath)
         let fallbackPath = getFallbackPath()
         
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd"
-        // 增量根目录仍然按天放置，分类在里面再细分，以保证 rsync 逻辑平稳
-        let dateFolderName = formatter.string(from: Date())
-        
-        let finalDestinationStr: String
+        // "目标文件夹不要用日期进行命名" -> Remove date component entirely
+        let destination: String
         if isTargetAvailable {
-            finalDestinationStr = URL(fileURLWithPath: targetPath).appendingPathComponent(dateFolderName).path
+            destination = targetPath
         } else if !fallbackPath.isEmpty {
-            finalDestinationStr = URL(fileURLWithPath: fallbackPath).appendingPathComponent(dateFolderName).path
+            destination = fallbackPath
         } else {
             print("Both main target and fallback paths are unavailable. Backup aborted.")
             return
         }
         
         let sourceName = volumeURL.lastPathComponent
-        self.runRsync(source: dcimURL.path, destination: finalDestinationStr, actionNameKey: "working", sourceName: sourceName, isMigrating: false, sourceVolumeURL: volumeURL)
+        self.runRsync(sources: sourceURLs.map { $0.path }, destination: destination, actionNameKey: "working", sourceName: sourceName, isMigrating: false, sourceVolumeURL: volumeURL)
     }
     
-    private func runRsync(source: String, destination: String, actionNameKey: String, sourceName: String, isMigrating: Bool, sourceVolumeURL: URL?) {
+    private func runRsync(sources: [String], destination: String, actionNameKey: String, sourceName: String, isMigrating: Bool, sourceVolumeURL: URL?) {
         guard !isWorking else {
             print("Already working, ignoring trigger.")
             return
         }
+        
+        guard !sources.isEmpty else { return }
         
         if !FileManager.default.fileExists(atPath: destination) {
             do {
@@ -319,10 +480,14 @@ class BackupManager: ObservableObject {
             
             let dryRunProcess = Process()
             dryRunProcess.executableURL = URL(fileURLWithPath: "/usr/bin/rsync")
-            let sourcePath = source.hasSuffix("/") ? source : source + "/"
             var dryArgs = ["-avn", "--out-format=%i"]
             if verifyChecksum { dryArgs.append("--checksum") }
-            dryArgs.append(sourcePath)
+            
+            for s in sources {
+                let sourcePath = s.hasSuffix("/") ? s : s + "/"
+                dryArgs.append(sourcePath)
+            }
+            
             dryArgs.append(destination)
             dryRunProcess.arguments = dryArgs
             
@@ -358,6 +523,7 @@ class BackupManager: ObservableObject {
             
             // 真实运行 rsync 
             let process = Process()
+            self.currentProcess = process
             
             // 强制伪终端(PTY)开启进行行缓存，解决 rsync 内部缓冲导致 SwiftUI 死结
             process.executableURL = URL(fileURLWithPath: "/usr/bin/script")
@@ -387,7 +553,10 @@ class BackupManager: ObservableObject {
                 }
             }
             
-            args.append(sourcePath)
+            for s in sources {
+                args.append(s)
+            }
+            
             args.append(destination)
             process.arguments = args
             
@@ -417,9 +586,21 @@ class BackupManager: ObservableObject {
                                 let percent = min(Double(copiedFilesCount) / Double(totalFilesToTransfer), 1.0)
                                 let percentInt = Int(percent * 100)
                                 
+                                var etaStr = ""
+                                if percent > 0 && percent < 1.0 {
+                                    let estTotalTime = elapsed / percent
+                                    let remainSeconds = max(0, estTotalTime - elapsed)
+                                    if remainSeconds > 60 {
+                                        etaStr = String(format: "%d分%d秒", Int(remainSeconds)/60, Int(remainSeconds)%60)
+                                    } else {
+                                        etaStr = String(format: "%d秒", Int(remainSeconds))
+                                    }
+                                }
+                                
                                 DispatchQueue.main.async {
                                     self.progressPercent = percent
                                     self.progressDetailText = String(format: "已传 %d/%d (%.1f MB/s)  %d%%", copiedFilesCount, totalFilesToTransfer, speed / 1_000_000, percentInt)
+                                    self.etaText = etaStr
                                 }
                             }
                         }
@@ -436,7 +617,9 @@ class BackupManager: ObservableObject {
                 
                 if process.terminationStatus == 0 {
                     if isMigrating {
-                        self.cleanEmptyDirectories(at: source)
+                        for s in sources {
+                            self.cleanEmptyDirectories(at: s)
+                        }
                     }
                     
                     if !isMigrating && sortFormats && copiedFilesCount > 0 {
@@ -467,6 +650,7 @@ class BackupManager: ObservableObject {
                 
                 DispatchQueue.main.async {
                     self.isWorking = false
+                    self.currentProcess = nil
                     print("Backup finished with status: \(process.terminationStatus)")
                 }
             } catch {
@@ -476,6 +660,7 @@ class BackupManager: ObservableObject {
                 self.addLog(log)
                 DispatchQueue.main.async {
                     self.isWorking = false
+                    self.currentProcess = nil
                 }
             }
         }

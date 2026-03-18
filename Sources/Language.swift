@@ -39,11 +39,16 @@ struct L10n {
             "migrating": "🔴 正在迁移...",
             "calculating": "计算待传输文件...",
             "connectedCards": "已挂载存储卡：",
-            "noCards": "未检测到含 DCIM 的存储卡。",
+            "noCards": "未检测到外部存储设备。",
             "settingsAction": "首选项...",
             "quit": "退出",
             "eject": "推出",
             "lastBackup": "上次备份：",
+            "cancelTransfer": "中断传输 (取消)",
+            "eta": "预计剩余时间：",
+            "selectSources": "选择要备份的源目录...",
+            "ignoreDevice": "忽略此存储设备",
+            "ignoreSuccess": "已将设备加入黑名单",
             
             "navBackup": "备份设置",
             "navAdvanced": "高级设置",
@@ -123,7 +128,14 @@ struct L10n {
             
             "about": "关于",
             "version": "版本",
-            "developer": "开发者"
+            "developer": "开发者",
+            "delete": "删除",
+            "noSources": "由系统自动决定备份位置 (DCIM)",
+            "addSource": "添加要备份的文件夹...",
+            "resetTitle": "重置软件设置",
+            "resetWarning": "⚠️ 确定要重置吗？所有授权设备、路径设置、文件过滤以及历史记录都将被清除且无法恢复。",
+            "resetBtn": "立即重置 (需重启软件)",
+            "resetSuccess": "重置成功，请手动重新启动软件。"
         ],
         "en": [
             "appName": "SD Backup Pro",
@@ -131,12 +143,17 @@ struct L10n {
             "working": "🔴 Processing...",
             "migrating": "🔴 Migrating...",
             "calculating": "Calculating files...",
-            "connectedCards": "Mounted SD Cards:",
-            "noCards": "No SD Cards containing DCIM detected.",
+            "connectedCards": "Mounted External Drives:",
+            "noCards": "No external drives detected.",
             "settingsAction": "Settings...",
             "quit": "Quit",
             "eject": "Eject",
             "lastBackup": "Last Backup: ",
+            "cancelTransfer": "Cancel Transfer",
+            "eta": "Estimated Time Remaining: ",
+            "selectSources": "Select Source Folders...",
+            "ignoreDevice": "Ignore this device",
+            "ignoreSuccess": "Device added to blacklist",
             
             "navBackup": "Backup Settings",
             "navAdvanced": "Advanced",
@@ -216,7 +233,14 @@ struct L10n {
             
             "about": "About",
             "version": "Version",
-            "developer": "Developer"
+            "developer": "Developer",
+            "delete": "Delete",
+            "noSources": "Automatic (Default Camera Folders)",
+            "addSource": "Add Source Folder...",
+            "resetTitle": "Reset App Settings",
+            "resetWarning": "⚠️ Are you sure? All trust history, paths, and logs will be permanently deleted.",
+            "resetBtn": "Reset Now (Restart Required)",
+            "resetSuccess": "Reset complete. Please restart the app."
         ]
     ]
 }

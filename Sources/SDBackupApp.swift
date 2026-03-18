@@ -18,6 +18,12 @@ struct SDBackupApp: App {
                 Text(L10n.translate(backupManager.currentActionTextKey, lang: env.languageCode))
                     .disabled(true)
                 
+                if !backupManager.etaText.isEmpty {
+                    Text("\(L10n.translate("eta", lang: env.languageCode))\(backupManager.etaText)")
+                        .font(.caption2)
+                        .disabled(true)
+                }
+                
                 if backupManager.progressDetailText.isEmpty {
                     Text(L10n.translate("calculating", lang: env.languageCode))
                         .font(.caption)
@@ -26,6 +32,12 @@ struct SDBackupApp: App {
                     Text(backupManager.progressDetailText)
                         .font(.caption)
                         .disabled(true)
+                }
+                
+                Divider()
+                
+                Button(L10n.translate("cancelTransfer", lang: env.languageCode)) {
+                    backupManager.cancelTransfer()
                 }
                 
                 Divider()
@@ -151,7 +163,7 @@ struct SettingsView: View {
                     case .backup: BackupSettingsView(backupManager: backupManager)
                     case .advanced: AdvancedSettingsView()
                     case .logs: LogsView(backupManager: backupManager)
-                    case .other: OtherSettingsView()
+                    case .other: OtherSettingsView(backupManager: backupManager)
                     }
                 }
                 .padding(24)
@@ -220,44 +232,6 @@ struct BackupSettingsView: View {
             
             GroupBox {
                 VStack(alignment: .leading, spacing: 12) {
-                    Toggle(isOn: $enableFileFilter) { LocalizedText("fileFilters") }
-                    if enableFileFilter {
-                        let formats = [
-                            ("ARW", env.localized("arwDesc")),
-                            ("CR3", env.localized("cr3Desc")),
-                            ("JPG", env.localized("jpgDesc")),
-                            ("HEIF", env.localized("heifDesc")),
-                            ("MP4", env.localized("mp4Desc")),
-                            ("XML", env.localized("xmlDesc")),
-                            ("XMP", env.localized("xmpDesc"))
-                        ]
-                        
-                        let cols = [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())]
-                        LazyVGrid(columns: cols, alignment: .leading, spacing: 8) {
-                            ForEach(formats, id: \.0) { fmt in
-                                Toggle(isOn: Binding(
-                                    get: { self.allowedFileExtensions.uppercased().contains(fmt.0) },
-                                    set: { isEnabled in
-                                        var exts = self.allowedFileExtensions.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).uppercased() }.filter { !$0.isEmpty }
-                                        if isEnabled {
-                                            if !exts.contains(fmt.0) { exts.append(fmt.0) }
-                                        } else {
-                                            exts.removeAll { $0 == fmt.0 }
-                                        }
-                                        self.allowedFileExtensions = exts.joined(separator: ", ")
-                                    }
-                                )) {
-                                    VStack(alignment: .leading) {
-                                        Text(fmt.0).font(.body)
-                                        Text(fmt.1).font(.caption2).foregroundColor(.secondary)
-                                    }
-                                }
-                            }
-                        }
-                        .padding(.vertical, 8)
-                        .padding(.leading, 18)
-                    }
-                    
                     Divider()
                     
                     if backupManager.connectedCards.isEmpty {
@@ -308,6 +282,85 @@ struct BackupSettingsView: View {
                                         }
                                         .padding(.top, 4)
                                     }
+                                    
+                                    // Custom Sources UI
+                                    HStack(spacing: 8) {
+                                        if !card.selectedSourcePaths.isEmpty {
+                                            ScrollView(.horizontal, showsIndicators: false) {
+                                                HStack(spacing: 6) {
+                                                    ForEach(card.selectedSourcePaths, id: \.self) { p in
+                                                        HStack(spacing: 4) {
+                                                            Text(URL(fileURLWithPath: p).lastPathComponent)
+                                                                .font(.subheadline)
+                                                                .foregroundColor(.primary)
+                                                            
+                                                            Button(action: {
+                                                                if let idx = backupManager.connectedCards.firstIndex(where: { $0.url == card.url }) {
+                                                                    backupManager.connectedCards[idx].selectedSourcePaths.removeAll(where: { $0 == p })
+                                                                    backupManager.saveSourcePaths(for: backupManager.connectedCards[idx])
+                                                                    backupManager.dummyTrigger.toggle()
+                                                                }
+                                                            }) {
+                                                                Image(systemName: "xmark.circle.fill")
+                                                                    .foregroundColor(.secondary)
+                                                                    .font(.system(size: 14))
+                                                            }
+                                                            .buttonStyle(.plain)
+                                                        }
+                                                        .padding(.leading, 10)
+                                                        .padding(.trailing, 6)
+                                                        .padding(.vertical, 5)
+                                                        .background(Color.blue.opacity(0.1))
+                                                        .cornerRadius(8)
+                                                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.blue.opacity(0.2), lineWidth: 1))
+                                                    }
+                                                }
+                                                .padding(.vertical, 2)
+                                            }
+                                        } else {
+                                            Text(env.localized("noSources")).font(.caption).foregroundColor(.secondary).padding(.leading, 4)
+                                        }
+                                        
+                                        Spacer()
+                                        
+                                        Button(action: {
+                                            let panel = NSOpenPanel()
+                                            panel.canChooseFiles = false
+                                            panel.canChooseDirectories = true
+                                            panel.allowsMultipleSelection = true
+                                            panel.directoryURL = card.url
+                                            panel.title = env.localized("addSource")
+                                            if panel.runModal() == .OK {
+                                                let newPaths = panel.urls.map { $0.path }
+                                                if let idx = backupManager.connectedCards.firstIndex(where: { $0.url == card.url }) {
+                                                    var currentPaths = backupManager.connectedCards[idx].selectedSourcePaths
+                                                    for p in newPaths {
+                                                        if !currentPaths.contains(p) {
+                                                            currentPaths.append(p)
+                                                        }
+                                                    }
+                                                    backupManager.connectedCards[idx].selectedSourcePaths = currentPaths
+                                                    backupManager.saveSourcePaths(for: backupManager.connectedCards[idx])
+                                                    backupManager.dummyTrigger.toggle()
+                                                }
+                                            }
+                                        }) {
+                                            if card.selectedSourcePaths.isEmpty {
+                                                HStack {
+                                                    Image(systemName: "plus.circle.fill")
+                                                    Text(env.localized("addSource"))
+                                                }
+                                                .padding(.horizontal, 8)
+                                                .padding(.vertical, 4)
+                                            } else {
+                                                Image(systemName: "plus.circle.fill")
+                                                    .font(.system(size: 20))
+                                                    .foregroundColor(.blue)
+                                            }
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+                                    .padding(.top, 6)
                                 }
                                 .contextMenu {
                                     if card.isTrusted {
@@ -315,6 +368,11 @@ struct BackupSettingsView: View {
                                             Text(env.localized("revokeTrust"))
                                             Image(systemName: "xmark.shield")
                                         }
+                                    }
+                                    
+                                    Button(role: .destructive, action: { backupManager.ignoreDevice(for: card.url) }) {
+                                        Text(env.localized("ignoreDevice"))
+                                        Image(systemName: "eye.slash")
                                     }
                                 }
                                 
@@ -360,7 +418,7 @@ struct PathSelector: View {
                         Text(spaceInfo.format).font(.caption).padding(.horizontal, 4).padding(.vertical, 2).background(Color.secondary.opacity(0.2)).cornerRadius(4)
                     }
                     
-                    Text("\(env.localized("freeSpace")) \(spaceInfo.text)")
+                    Text("\(env.localized("freeSpace")) \(spaceInfo.text) / \(String(format: "%.1f GB", spaceInfo.total)) (\(Int((1.0 - spaceInfo.usedPercent) * 100))%)")
                         .font(.caption)
                         .foregroundColor(spaceInfo.isWarning ? .red : .secondary)
                     
@@ -429,7 +487,9 @@ func getFreeSpacePercentage(forPath path: String) -> (text: String, isWarning: B
     var format = ""
     let url = URL(fileURLWithPath: checkPath)
     if let r = try? url.resourceValues(forKeys: [.volumeLocalizedFormatDescriptionKey]) {
-        if let fmt = r.volumeLocalizedFormatDescription { format = fmt }
+        if let fmt = r.volumeLocalizedFormatDescription { 
+            format = fmt.replacingOccurrences(of: " (Encrypted)", with: "", options: .caseInsensitive).replacingOccurrences(of: "（已加密）", with: "") 
+        }
     }
     
     do {
@@ -459,6 +519,8 @@ struct AdvancedSettingsView: View {
     @AppStorage("openFinderOnFinish") private var openFinderOnFinish: Bool = true
     @AppStorage("autoMigrateFallback") private var autoMigrateFallback: Bool = true
     @AppStorage("backupStrategy") private var backupStrategy: Int = 0
+    @AppStorage("enableFileFilter") private var enableFileFilter: Bool = false
+    @AppStorage("allowedFileExtensions") private var allowedFileExtensions: String = ""
     
     @EnvironmentObject var env: AppEnvironment
     
@@ -471,6 +533,44 @@ struct AdvancedSettingsView: View {
                         Text(env.localized("strategyIgnore")).tag(1)
                     }
                     .pickerStyle(.menu)
+                    
+                    Toggle(isOn: $enableFileFilter) { LocalizedText("fileFilters") }
+                    if enableFileFilter {
+                        let formats = [
+                            ("ARW", env.localized("arwDesc")),
+                            ("CR3", env.localized("cr3Desc")),
+                            ("JPG", env.localized("jpgDesc")),
+                            ("HEIF", env.localized("heifDesc")),
+                            ("MP4", env.localized("mp4Desc")),
+                            ("XML", env.localized("xmlDesc")),
+                            ("XMP", env.localized("xmpDesc"))
+                        ]
+                        
+                        let cols = [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())]
+                        LazyVGrid(columns: cols, alignment: .leading, spacing: 8) {
+                            ForEach(formats, id: \.0) { fmt in
+                                Toggle(isOn: Binding(
+                                    get: { self.allowedFileExtensions.uppercased().contains(fmt.0) },
+                                    set: { isEnabled in
+                                        var exts = self.allowedFileExtensions.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).uppercased() }.filter { !$0.isEmpty }
+                                        if isEnabled {
+                                            if !exts.contains(fmt.0) { exts.append(fmt.0) }
+                                        } else {
+                                            exts.removeAll { $0 == fmt.0 }
+                                        }
+                                        self.allowedFileExtensions = exts.joined(separator: ", ")
+                                    }
+                                )) {
+                                    VStack(alignment: .leading) {
+                                        Text(fmt.0).font(.body)
+                                        Text(fmt.1).font(.caption2).foregroundColor(.secondary)
+                                    }
+                                }
+                            }
+                        }
+                        .padding(.vertical, 8)
+                        .padding(.leading, 18)
+                    }
                     
                     Toggle(isOn: $verifyChecksum) {
                         VStack(alignment: .leading) {
@@ -585,11 +685,12 @@ struct LogsView: View {
 }
 
 struct OtherSettingsView: View {
+    @EnvironmentObject var env: AppEnvironment
+    @ObservedObject var backupManager: BackupManager
     @AppStorage("hideDockIcon") private var hideDockIcon: Bool = true
     @AppStorage("autoStart") private var autoStart: Bool = false
     @AppStorage("appLanguage") private var appLanguage: String = "zh-Hans"
-    
-    @EnvironmentObject var env: AppEnvironment
+    @State private var showingResetAlert = false
     
     var body: some View {
         VStack(spacing: 24) {
@@ -606,6 +707,33 @@ struct OtherSettingsView: View {
                     }
                     .pickerStyle(.segmented)
                     // 当切换时，AppEnvironment @AppStorage 自动更新触发通知
+                }
+                
+                Section(header: Text(env.localized("resetTitle")).font(.headline).foregroundColor(.red)) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text(env.localized("resetWarning"))
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        
+                        Button(role: .destructive, action: {
+                            showingResetAlert = true
+                        }) {
+                            HStack {
+                                Image(systemName: "trash")
+                                Text(env.localized("resetBtn"))
+                            }
+                        }
+                        .alert(isPresented: $showingResetAlert) {
+                            Alert(
+                                title: Text(env.localized("resetTitle")),
+                                message: Text(env.localized("resetWarning")),
+                                primaryButton: .destructive(Text(env.localized("resetBtn"))) {
+                                    backupManager.resetAllSettings()
+                                },
+                                secondaryButton: .cancel()
+                            )
+                        }
+                    }
                 }
                 
                 Section(header: LocalizedText("about").font(.headline).foregroundColor(.primary).padding(.top, 16)) {
