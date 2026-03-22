@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import ImageIO
+import UserNotifications
 
 struct ConnectedCard: Identifiable, Equatable {
     var id: URL { url }
@@ -54,6 +55,7 @@ class BackupManager: ObservableObject {
     
     @Published var progressPercent: Double = 0.0
     @Published var progressDetailText: String = "" 
+    private let sleepPreventer = SleepPreventer()
     
     @Published var connectedCards: [ConnectedCard] = []
     @Published var backupHistory: [BackupLog] = []
@@ -66,10 +68,40 @@ class BackupManager: ObservableObject {
     private var animationTimer: Timer?
     
     init() {
+        requestNotificationPermission()
         loadTrustedDevices()
         loadHistory()
         checkExistingVolumes()
         startListening()
+    }
+    
+    private func requestNotificationPermission() {
+        guard Bundle.main.bundleIdentifier != nil else {
+            print("INFO: UNUserNotificationCenter skipped (no bundle ID).")
+            return
+        }
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
+            if granted {
+                print("Notification permission granted.")
+            } else if let error = error {
+                print("Notification permission error: \(error.localizedDescription)")
+            }
+        }
+    }
+    
+    private func sendNotification(titleKey: String, body: String, isSuccess: Bool = true) {
+        guard Bundle.main.bundleIdentifier != nil else {
+            print("Notification (Term): [\(body)]")
+            return
+        }
+        
+        let content = UNMutableNotificationContent()
+        content.title = L10n.translate(titleKey, lang: UserDefaults.standard.string(forKey: "appLanguage") ?? "zh-Hans")
+        content.body = body
+        content.sound = isSuccess ? .default : .defaultCritical
+        
+        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request)
     }
     
     private func loadHistory() {
@@ -464,6 +496,7 @@ class BackupManager: ObservableObject {
             self.currentActionTextKey = actionNameKey
             self.progressPercent = 0.0
             self.progressDetailText = "" // Let L10n handle the calculating state text later
+            self.etaText = ""
         }
         
         let startTime = Date()
@@ -476,7 +509,6 @@ class BackupManager: ObservableObject {
         // 我们用 -n 跑一遍空转获取总数据量来实现真正的进度条（牺牲几秒钟时间换取体验）
         DispatchQueue.global(qos: .userInitiated).async {
             var totalFilesToTransfer: Int = 0
-            var _: [Int64] = [] // 不强统计具体字节大小只按文件个数做进度可以非常快
             
             let dryRunProcess = Process()
             dryRunProcess.executableURL = URL(fileURLWithPath: "/usr/bin/rsync")
@@ -496,7 +528,6 @@ class BackupManager: ObservableObject {
             
             do {
                 try dryRunProcess.run()
-                // 读取完整输出
                 let data = dryPipe.fileHandleForReading.readDataToEndOfFile()
                 if let str = String(data: data, encoding: .utf8) {
                     let lines = str.components(separatedBy: .newlines)
@@ -508,10 +539,9 @@ class BackupManager: ObservableObject {
                 }
                 dryRunProcess.waitUntilExit()
             } catch {
-                print("Dry run failed.")
+                print("Dry run failed: \(error)")
             }
             
-            // 如果计算出是 0，直接结束不用真跑
             if totalFilesToTransfer == 0 {
                 DispatchQueue.main.async {
                     self.isWorking = false
@@ -525,52 +555,62 @@ class BackupManager: ObservableObject {
             let process = Process()
             self.currentProcess = process
             
-            // 强制伪终端(PTY)开启进行行缓存，解决 rsync 内部缓冲导致 SwiftUI 死结
             process.executableURL = URL(fileURLWithPath: "/usr/bin/script")
             let strategy = UserDefaults.standard.integer(forKey: "backupStrategy")
             var args = ["-q", "/dev/null", "/usr/bin/rsync", "-av", "--out-format=%i %n %l"]
             if strategy == 1 {
                 args.append("--ignore-existing")
             } else {
-                args.append("-u") // default: update based on size/date
+                args.append("-u") 
             }
             
             if verifyChecksum { args.append("--checksum") }
             if isMigrating { args.append("--remove-source-files") }
+            args.append("--partial")
             
-            // File Filters
+            // 安全覆盖策略：保留冲突文件
+            args.append("--backup")
+            args.append("--suffix=_\(Int(Date().timeIntervalSince1970))")
+            
+            let preventSleep = UserDefaults.standard.bool(forKey: "preventSleep")
+            if preventSleep {
+                self.sleepPreventer.startPreventingSleep(reason: "SD Backup: \(sourceName)")
+            }
+            
             if UserDefaults.standard.bool(forKey: "enableFileFilter") {
-                let extsStr = UserDefaults.standard.string(forKey: "allowedFileExtensions") ?? "arw, cr2, cr3, jpg, heif, mov, mp4, xml"
+                let extsStr = UserDefaults.standard.string(forKey: "allowedFileExtensions") ?? ""
                 let extArray = extsStr.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).lowercased() }.filter { !$0.isEmpty }
-                
                 if !extArray.isEmpty {
-                    args.append("--include=*/") // allow traversal
+                    args.append("--include=*/")
                     for ext in extArray {
                         args.append("--include=*.\(ext)")
                         args.append("--include=*.\(ext.uppercased())")
                     }
-                    args.append("--exclude=*") // block everything else
+                    args.append("--exclude=*")
                 }
             }
             
-            for s in sources {
-                args.append(s)
-            }
-            
+            for s in sources { args.append(s) }
             args.append(destination)
             process.arguments = args
             
             let pipe = Pipe()
+            let errorPipe = Pipe()
             process.standardOutput = pipe
-            process.standardError = Pipe()
+            process.standardError = errorPipe
             
             var transferredBytes: Int64 = 0
             var copiedFilesCount: Int = 0
+            var errorOutput = ""
+            
+            errorPipe.fileHandleForReading.readabilityHandler = { handle in
+                let data = handle.availableData
+                if let str = String(data: data, encoding: .utf8) { errorOutput += str }
+            }
             
             pipe.fileHandleForReading.readabilityHandler = { handle in
                 let data = handle.availableData
                 guard !data.isEmpty, let str = String(data: data, encoding: .utf8) else { return }
-                
                 let lines = str.components(separatedBy: .newlines)
                 for line in lines where !line.isEmpty {
                     let parts = line.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: true)
@@ -580,11 +620,9 @@ class BackupManager: ObservableObject {
                             if let size = Int64(parts[2]) {
                                 transferredBytes += size
                                 copiedFilesCount += 1
-                                
                                 let elapsed = Date().timeIntervalSince(startTime)
                                 let speed = elapsed > 0 ? Double(transferredBytes) / elapsed : 0
                                 let percent = min(Double(copiedFilesCount) / Double(totalFilesToTransfer), 1.0)
-                                let percentInt = Int(percent * 100)
                                 
                                 var etaStr = ""
                                 if percent > 0 && percent < 1.0 {
@@ -599,7 +637,7 @@ class BackupManager: ObservableObject {
                                 
                                 DispatchQueue.main.async {
                                     self.progressPercent = percent
-                                    self.progressDetailText = String(format: "已传 %d/%d (%.1f MB/s)  %d%%", copiedFilesCount, totalFilesToTransfer, speed / 1_000_000, percentInt)
+                                    self.progressDetailText = String(format: "已传 %d/%d (%.1f MB/s)  %d%%", copiedFilesCount, totalFilesToTransfer, speed / 1_000_000, Int(percent * 100))
                                     self.etaText = etaStr
                                 }
                             }
@@ -612,16 +650,15 @@ class BackupManager: ObservableObject {
                 try process.run()
                 process.waitUntilExit()
                 pipe.fileHandleForReading.readabilityHandler = nil
+                errorPipe.fileHandleForReading.readabilityHandler = nil
                 
+                let exitStatus = process.terminationStatus
                 let duration = Date().timeIntervalSince(startTime)
                 
-                if process.terminationStatus == 0 {
+                if exitStatus == 0 {
                     if isMigrating {
-                        for s in sources {
-                            self.cleanEmptyDirectories(at: s)
-                        }
+                        for s in sources { self.cleanEmptyDirectories(at: s) }
                     }
-                    
                     if !isMigrating && sortFormats && copiedFilesCount > 0 {
                         self.organizeFormatsWithTemplate(in: destination)
                     }
@@ -638,30 +675,43 @@ class BackupManager: ObservableObject {
                     
                     let transferredMB = Double(transferredBytes) / 1_000_000
                     let dataStr = transferredMB > 1000 ? String(format: "%.2f GB", transferredMB / 1000) : String(format: "%.1f MB", transferredMB)
-                    let resultStr = copiedFilesCount > 0 ? "成功" : "无新文件"
+                    let statMsg = "已检查 \(totalFilesToTransfer) 个文件，新增备份 \(copiedFilesCount) 个文件 (\(dataStr))"
                     
-                    let log = BackupLog(date: Date(), sourceName: sourceName, destinationPath: destination, dataTransferredStr: dataStr, fileCount: copiedFilesCount, durationSeconds: duration, result: resultStr)
+                    self.sendNotification(titleKey: "appName", body: "\(sourceName) 备份完成: \(statMsg)", isSuccess: true)
+                    
+                    let log = BackupLog(date: Date(), sourceName: sourceName, destinationPath: destination, dataTransferredStr: dataStr, fileCount: copiedFilesCount, durationSeconds: duration, result: "成功 (\(statMsg))")
                     self.addLog(log)
-                    
                 } else {
-                    let log = BackupLog(date: Date(), sourceName: sourceName, destinationPath: destination, dataTransferredStr: "0 MB", fileCount: 0, durationSeconds: duration, result: "失败")
+                    var errorReason = "任务出错 (Exit: \(exitStatus))"
+                    if exitStatus == 12 { errorReason = "存储空间不足" }
+                    else if exitStatus == 10 || exitStatus == 11 || exitStatus == 23 { errorReason = "物理连接断开" }
+                    else if exitStatus == 20 { errorReason = "用户手动取消" }
+                    else if exitStatus == 21 { errorReason = "校验异常 (Checksum Error)" }
+                    
+                    if !errorOutput.isEmpty {
+                        print("Rsync Error: \(errorOutput)")
+                    }
+                    
+                    if exitStatus != 20 { // 忽略手动取消的通知
+                        self.sendNotification(titleKey: "appName", body: "⚠️ 备份异常: \(sourceName) - \(errorReason)", isSuccess: false)
+                    }
+                    
+                    let log = BackupLog(date: Date(), sourceName: sourceName, destinationPath: destination, dataTransferredStr: "0 MB", fileCount: 0, durationSeconds: duration, result: "失败 (\(errorReason))")
                     self.addLog(log)
-                }
-                
-                DispatchQueue.main.async {
-                    self.isWorking = false
-                    self.currentProcess = nil
-                    print("Backup finished with status: \(process.terminationStatus)")
                 }
             } catch {
                 print("Failed to run rsync: \(error)")
                 pipe.fileHandleForReading.readabilityHandler = nil
-                let log = BackupLog(date: Date(), sourceName: sourceName, destinationPath: destination, dataTransferredStr: "0 MB", fileCount: 0, durationSeconds: 0, result: "失败")
+                errorPipe.fileHandleForReading.readabilityHandler = nil
+                let log = BackupLog(date: Date(), sourceName: sourceName, destinationPath: destination, dataTransferredStr: "0 MB", fileCount: 0, durationSeconds: 0, result: "系统错误")
                 self.addLog(log)
-                DispatchQueue.main.async {
-                    self.isWorking = false
-                    self.currentProcess = nil
-                }
+            }
+            
+            self.sleepPreventer.stopPreventingSleep()
+            DispatchQueue.main.async {
+                self.isWorking = false
+                self.currentProcess = nil
+                print("Backup finished with status: \(process.terminationStatus)")
             }
         }
     }

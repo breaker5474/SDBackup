@@ -15,8 +15,12 @@ struct SDBackupApp: App {
     var body: some Scene {
         MenuBarExtra(L10n.translate("appName", lang: env.languageCode), systemImage: backupManager.isWorking ? (backupManager.isWorkingAnimationToggle ? "arrow.triangle.2.circlepath.circle.fill" : "arrow.triangle.2.circlepath") : "sdcard") {
             if backupManager.isWorking {
-                Text(L10n.translate(backupManager.currentActionTextKey, lang: env.languageCode))
-                    .disabled(true)
+                HStack {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .foregroundColor(.blue)
+                    Text(L10n.translate(backupManager.currentActionTextKey, lang: env.languageCode))
+                }
+                .disabled(true)
                 
                 if !backupManager.etaText.isEmpty {
                     Text("\(L10n.translate("eta", lang: env.languageCode))\(backupManager.etaText)")
@@ -253,7 +257,7 @@ struct BackupSettingsView: View {
                                         Text(card.name).fontWeight(.medium)
                                         Text(card.format).font(.caption).padding(.horizontal, 4).padding(.vertical, 2).background(Color.secondary.opacity(0.2)).cornerRadius(4)
                                         Spacer()
-                                        Text("\(env.localized("freeCap")): \(String(format: "%.1f", freeGB))GB / \(String(format: "%.1f", totalGB))GB")
+                                        Text("\(env.localized("freeCap")): \(String(format: "%.1f", freeGB))GB / \(String(format: "%.1f", totalGB))GB (\(Int(usedPerc * 100))%)")
                                             .font(.caption)
                                             .foregroundColor(.secondary)
                                     }
@@ -284,8 +288,14 @@ struct BackupSettingsView: View {
                                     }
                                     
                                     // Custom Sources UI
-                                    HStack(spacing: 8) {
-                                        if !card.selectedSourcePaths.isEmpty {
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text(env.localized("sourceSelectionHint"))
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                            .padding(.leading, 4)
+                                        
+                                        HStack(spacing: 8) {
+                                            if !card.selectedSourcePaths.isEmpty {
                                             ScrollView(.horizontal, showsIndicators: false) {
                                                 HStack(spacing: 6) {
                                                     ForEach(card.selectedSourcePaths, id: \.self) { p in
@@ -361,6 +371,7 @@ struct BackupSettingsView: View {
                                         .buttonStyle(.plain)
                                     }
                                     .padding(.top, 6)
+                                }
                                 }
                                 .contextMenu {
                                     if card.isTrusted {
@@ -519,8 +530,10 @@ struct AdvancedSettingsView: View {
     @AppStorage("openFinderOnFinish") private var openFinderOnFinish: Bool = true
     @AppStorage("autoMigrateFallback") private var autoMigrateFallback: Bool = true
     @AppStorage("backupStrategy") private var backupStrategy: Int = 0
+    @AppStorage("preventSleep") private var preventSleep: Bool = true
+    @AppStorage("checksumType") private var checksumType: Int = 0 
     @AppStorage("enableFileFilter") private var enableFileFilter: Bool = false
-    @AppStorage("allowedFileExtensions") private var allowedFileExtensions: String = ""
+    @AppStorage("allowedFileExtensions") private var allowedFileExtensions: String = "arw, cr2, cr3, jpg, heif, mov, mp4, xml"
     
     @EnvironmentObject var env: AppEnvironment
     
@@ -578,6 +591,18 @@ struct AdvancedSettingsView: View {
                             LocalizedText("verifyChecksumHint").font(.caption).foregroundColor(.secondary)
                         }
                     }
+                    
+                    if verifyChecksum {
+                        Picker(env.localized("checksumType"), selection: $checksumType) {
+                            LocalizedText("checksumRsync").tag(0)
+                            LocalizedText("checksumMD5").tag(1)
+                            LocalizedText("checksumSHA256").tag(2)
+                        }
+                        .pickerStyle(.menu)
+                        .padding(.leading, 20)
+                    }
+                    
+                    Toggle(isOn: $preventSleep) { LocalizedText("preventSleep") }
                     
                     Toggle(isOn: $sortFormats) {
                         VStack(alignment: .leading) {
@@ -740,12 +765,12 @@ struct OtherSettingsView: View {
                     HStack {
                         LocalizedText("version").foregroundColor(.secondary)
                         Spacer()
-                        Text("Pro 1.5.2 (Build 7)")
+                        Text("0.8.0").foregroundColor(.secondary)
                     }
                     HStack {
-                        LocalizedText("developer").foregroundColor(.secondary)
+                        LocalizedText("developerKey").foregroundColor(.secondary)
                         Spacer()
-                        Text("南洋 (Nanyang)")
+                        Text("南洋Nayan").foregroundColor(.secondary)
                     }
                 }
             }
