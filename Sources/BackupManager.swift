@@ -32,8 +32,8 @@ class BackupManager: ObservableObject {
                 DispatchQueue.main.async {
                     self.isWorkingAnimationToggle = false
                     self.animationTimer?.invalidate()
-                    self.animationTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
-                        self.isWorkingAnimationToggle.toggle()
+                    self.animationTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+                        self?.isWorkingAnimationToggle.toggle()
                     }
                 }
             } else {
@@ -200,22 +200,17 @@ class BackupManager: ObservableObject {
             }
         }
     }
-    
+
     func ejectCard(url: URL) {
-        let isVolume = url.pathComponents.count > 1 && url.pathComponents[1] == "Volumes"
         DispatchQueue.global(qos: .userInitiated).async {
-            if isVolume {
-                try? NSWorkspace.shared.unmountAndEjectDevice(at: url)
-            } else {
-                try? NSWorkspace.shared.unmountAndEjectDevice(at: url)
-            }
+            try? NSWorkspace.shared.unmountAndEjectDevice(at: url)
             // 稍等一秒后从 UI 移除
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                 self.removeCard(url: url)
             }
         }
     }
-    
+
     func removeCard(url: URL) {
         connectedCards.removeAll { $0.url == url }
     }
@@ -358,10 +353,11 @@ class BackupManager: ObservableObject {
                 print("DEBUG: Skipping Apple-formatted external drive without camera folders: \(name)")
                 return false
             }
-            
+
             // 容量判定 (摄影存储卡通常不会超过 1TB)
-            let oneTera: Int64 = 1_100_000_000_000 
-            if totalCapacity > oneTera {
+            // 使用 1.1TB 作为阈值，留出一些余量（1TB = 1_000_000_000_000 bytes）
+            let capacityThreshold: Int64 = 1_100_000_000_000
+            if totalCapacity > capacityThreshold {
                 // 同上，除非有相机目录
                 let cameraPaths = ["DCIM", "PRIVATE", "VIDEO", "CLIP", "AVCHD"]
                 for p in cameraPaths {
@@ -781,7 +777,11 @@ class BackupManager: ObservableObject {
             let destFile = destFolderURL.appendingPathComponent(fileURL.lastPathComponent)
             
             if !fm.fileExists(atPath: destFile.path) {
-                try? fm.moveItem(at: fileURL, to: destFile)
+                do {
+                    try fm.moveItem(at: fileURL, to: destFile)
+                } catch {
+                    print("Failed to move file \(fileURL.lastPathComponent): \(error.localizedDescription)")
+                }
             }
         }
         

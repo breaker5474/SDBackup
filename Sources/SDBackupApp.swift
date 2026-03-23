@@ -474,10 +474,13 @@ struct PathSelector: View {
         guard !path.isEmpty else { return }
         var checkPath = path
         var isDir: ObjCBool = false
-        while !FileManager.default.fileExists(atPath: checkPath, isDirectory: &isDir) {
+        var iterations = 0
+        let maxIterations = 100
+        while !FileManager.default.fileExists(atPath: checkPath, isDirectory: &isDir) && iterations < maxIterations {
             let parent = URL(fileURLWithPath: checkPath).deletingLastPathComponent().path
             if parent == checkPath { break }
             checkPath = parent
+            iterations += 1
         }
         NSWorkspace.shared.open(URL(fileURLWithPath: checkPath))
     }
@@ -486,23 +489,26 @@ struct PathSelector: View {
 // 拓展原有的 Free Space 以支持带进度条返回
 func getFreeSpacePercentage(forPath path: String) -> (text: String, isWarning: Bool, usedPercent: Double, total: Double, format: String) {
     if path.isEmpty { return ("", false, 0.0, 0.0, "") }
-    
+
     var checkPath = path
     var isDir: ObjCBool = false
-    while !FileManager.default.fileExists(atPath: checkPath, isDirectory: &isDir) {
+    var iterations = 0
+    let maxIterations = 100
+    while !FileManager.default.fileExists(atPath: checkPath, isDirectory: &isDir) && iterations < maxIterations {
         let parent = URL(fileURLWithPath: checkPath).deletingLastPathComponent().path
         if parent == checkPath { break }
         checkPath = parent
+        iterations += 1
     }
-    
+
     var format = ""
     let url = URL(fileURLWithPath: checkPath)
     if let r = try? url.resourceValues(forKeys: [.volumeLocalizedFormatDescriptionKey]) {
-        if let fmt = r.volumeLocalizedFormatDescription { 
-            format = fmt.replacingOccurrences(of: " (Encrypted)", with: "", options: .caseInsensitive).replacingOccurrences(of: "（已加密）", with: "") 
+        if let fmt = r.volumeLocalizedFormatDescription {
+            format = fmt.replacingOccurrences(of: " (Encrypted)", with: "", options: .caseInsensitive).replacingOccurrences(of: "（已加密）", with: "")
         }
     }
-    
+
     do {
         let attrs = try FileManager.default.attributesOfFileSystem(forPath: checkPath)
         if let freeSize = attrs[.systemFreeSize] as? NSNumber, let sysTotal = attrs[.systemSize] as? NSNumber {
@@ -510,10 +516,10 @@ func getFreeSpacePercentage(forPath path: String) -> (text: String, isWarning: B
             let tGB = Double(sysTotal.int64Value) / 1_000_000_000.0
             let used = tGB - gigabytes
             let perc = tGB > 0 ? (used / tGB) : 0.0
-            
+
             let formatted = String(format: "%.1f GB", gigabytes)
             let isWarning = gigabytes < 10.0 || (1.0 - perc) < 0.1 // 空间少于10G或少于10%变红
-            
+
             return (formatted, isWarning, perc, tGB, format)
         }
     } catch {
@@ -694,11 +700,15 @@ struct LogsView: View {
             HStack {
                 Spacer()
                 Button(action: {
-                    let logURL = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first!.appendingPathComponent("Logs/SDBackupApp.log")
+                    guard let libraryURL = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first else {
+                        print("Error: Unable to locate Library directory")
+                        return
+                    }
+                    let logURL = libraryURL.appendingPathComponent("Logs/SDBackupApp.log")
                     if FileManager.default.fileExists(atPath: logURL.path) {
                         NSWorkspace.shared.open(logURL)
                     } else {
-                        NSWorkspace.shared.open(FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first!.appendingPathComponent("Logs"))
+                        NSWorkspace.shared.open(libraryURL.appendingPathComponent("Logs"))
                     }
                 }) {
                     Label(env.localized("openLogFolder"), systemImage: "doc.text.viewfinder")
@@ -722,10 +732,15 @@ struct OtherSettingsView: View {
             Form {
                 Section(header: LocalizedText("otherLook").font(.headline).foregroundColor(.primary)) {
                     Toggle(isOn: $hideDockIcon) { LocalizedText("hideDock") }
-                    
-                    Toggle(isOn: $autoStart) { LocalizedText("autoStart") }
-                        .disabled(true) 
-                    
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Toggle(isOn: $autoStart) { LocalizedText("autoStart") }
+                            .disabled(true)
+                        Text(env.localized("autoStartDisabled"))
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+
                     Picker(selection: $appLanguage, label: LocalizedText("lang")) {
                         Text("简体中文").tag("zh-Hans")
                         Text("English").tag("en")
