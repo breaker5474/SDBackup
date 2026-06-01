@@ -10,7 +10,6 @@ struct SDBackupApp: App {
     
     // 其他设置
     @AppStorage("hideDockIcon") private var hideDockIcon: Bool = true
-    @AppStorage("autoStart") private var autoStart: Bool = false
     
     var body: some Scene {
         MenuBarExtra(L10n.translate("appName", lang: env.languageCode), systemImage: backupManager.isWorking ? (backupManager.isWorkingAnimationToggle ? "arrow.triangle.2.circlepath.circle.fill" : "arrow.triangle.2.circlepath") : "sdcard") {
@@ -173,7 +172,6 @@ struct SettingsView: View {
                 .padding(24)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
-            // Using empty string as navigationTitle handles dynamic changes better
             .navigationTitle("")
         }
         .frame(minWidth: 700, minHeight: 500)
@@ -188,9 +186,6 @@ struct BackupSettingsView: View {
     @AppStorage("enableFallbackPath") private var enableFallbackPath: Bool = false
     @AppStorage("localBackupPath") private var localBackupPath: String = ""
     @AppStorage("autoBackupOnMount") private var autoBackupOnMount: Bool = true
-    
-    @AppStorage("enableFileFilter") private var enableFileFilter: Bool = false
-    @AppStorage("allowedFileExtensions") private var allowedFileExtensions: String = "arw, cr2, cr3, jpg, heif, mov, mp4, xml"
     
     @ObservedObject var backupManager: BackupManager
     @State private var timer = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
@@ -262,7 +257,6 @@ struct BackupSettingsView: View {
                                             .foregroundColor(.secondary)
                                     }
                                     
-                                    // 存储卡容量横条
                                     if totalGB > 0 {
                                         GeometryReader { geo in
                                             ZStack(alignment: .leading) {
@@ -287,7 +281,6 @@ struct BackupSettingsView: View {
                                         .padding(.top, 4)
                                     }
                                     
-                                    // Custom Sources UI
                                     VStack(alignment: .leading, spacing: 4) {
                                         Text(env.localized("sourceSelectionHint"))
                                             .font(.caption)
@@ -296,94 +289,57 @@ struct BackupSettingsView: View {
                                         
                                         HStack(spacing: 8) {
                                             if !card.selectedSourcePaths.isEmpty {
-                                            ScrollView(.horizontal, showsIndicators: false) {
-                                                HStack(spacing: 6) {
-                                                    ForEach(card.selectedSourcePaths, id: \.self) { p in
-                                                        HStack(spacing: 4) {
-                                                            Text(URL(fileURLWithPath: p).lastPathComponent)
-                                                                .font(.subheadline)
-                                                                .foregroundColor(.primary)
-                                                            
-                                                            Button(action: {
-                                                                if let idx = backupManager.connectedCards.firstIndex(where: { $0.url == card.url }) {
-                                                                    backupManager.connectedCards[idx].selectedSourcePaths.removeAll(where: { $0 == p })
-                                                                    backupManager.saveSourcePaths(for: backupManager.connectedCards[idx])
-                                                                    backupManager.dummyTrigger.toggle()
+                                                ScrollView(.horizontal, showsIndicators: false) {
+                                                    HStack(spacing: 6) {
+                                                        ForEach(card.selectedSourcePaths, id: \.self) { p in
+                                                            HStack(spacing: 4) {
+                                                                Text(URL(fileURLWithPath: p).lastPathComponent).font(.subheadline)
+                                                                Button(action: {
+                                                                    if let idx = backupManager.connectedCards.firstIndex(where: { $0.url == card.url }) {
+                                                                        backupManager.connectedCards[idx].selectedSourcePaths.removeAll(where: { $0 == p })
+                                                                        backupManager.saveSourcePaths(for: backupManager.connectedCards[idx])
+                                                                        backupManager.dummyTrigger.toggle()
+                                                                    }
+                                                                }) {
+                                                                    Image(systemName: "xmark.circle.fill").foregroundColor(.secondary).font(.system(size: 14))
                                                                 }
-                                                            }) {
-                                                                Image(systemName: "xmark.circle.fill")
-                                                                    .foregroundColor(.secondary)
-                                                                    .font(.system(size: 14))
+                                                                .buttonStyle(.plain)
                                                             }
-                                                            .buttonStyle(.plain)
-                                                        }
-                                                        .padding(.leading, 10)
-                                                        .padding(.trailing, 6)
-                                                        .padding(.vertical, 5)
-                                                        .background(Color.blue.opacity(0.1))
-                                                        .cornerRadius(8)
-                                                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.blue.opacity(0.2), lineWidth: 1))
-                                                    }
-                                                }
-                                                .padding(.vertical, 2)
-                                            }
-                                        } else {
-                                            Text(env.localized("noSources")).font(.caption).foregroundColor(.secondary).padding(.leading, 4)
-                                        }
-                                        
-                                        Spacer()
-                                        
-                                        Button(action: {
-                                            let panel = NSOpenPanel()
-                                            panel.canChooseFiles = false
-                                            panel.canChooseDirectories = true
-                                            panel.allowsMultipleSelection = true
-                                            panel.directoryURL = card.url
-                                            panel.title = env.localized("addSource")
-                                            if panel.runModal() == .OK {
-                                                let newPaths = panel.urls.map { $0.path }
-                                                if let idx = backupManager.connectedCards.firstIndex(where: { $0.url == card.url }) {
-                                                    var currentPaths = backupManager.connectedCards[idx].selectedSourcePaths
-                                                    for p in newPaths {
-                                                        if !currentPaths.contains(p) {
-                                                            currentPaths.append(p)
+                                                            .padding(.leading, 10).padding(.trailing, 6).padding(.vertical, 5)
+                                                            .background(Color.blue.opacity(0.1)).cornerRadius(8)
                                                         }
                                                     }
-                                                    backupManager.connectedCards[idx].selectedSourcePaths = currentPaths
-                                                    backupManager.saveSourcePaths(for: backupManager.connectedCards[idx])
-                                                    backupManager.dummyTrigger.toggle()
                                                 }
-                                            }
-                                        }) {
-                                            if card.selectedSourcePaths.isEmpty {
-                                                HStack {
-                                                    Image(systemName: "plus.circle.fill")
-                                                    Text(env.localized("addSource"))
-                                                }
-                                                .padding(.horizontal, 8)
-                                                .padding(.vertical, 4)
                                             } else {
-                                                Image(systemName: "plus.circle.fill")
-                                                    .font(.system(size: 20))
-                                                    .foregroundColor(.blue)
+                                                Text(env.localized("noSources")).font(.caption).foregroundColor(.secondary).padding(.leading, 4)
                                             }
+                                            
+                                            Button(action: {
+                                                let panel = NSOpenPanel()
+                                                panel.canChooseFiles = false
+                                                panel.canChooseDirectories = true
+                                                panel.allowsMultipleSelection = true
+                                                panel.directoryURL = card.url
+                                                panel.title = env.localized("addSource")
+                                                if panel.runModal() == .OK {
+                                                    let newPaths = panel.urls.map { $0.path }
+                                                    if let idx = backupManager.connectedCards.firstIndex(where: { $0.url == card.url }) {
+                                                        var currentPaths = backupManager.connectedCards[idx].selectedSourcePaths
+                                                        for p in newPaths {
+                                                            if !currentPaths.contains(p) { currentPaths.append(p) }
+                                                        }
+                                                        backupManager.connectedCards[idx].selectedSourcePaths = currentPaths
+                                                        backupManager.saveSourcePaths(for: backupManager.connectedCards[idx])
+                                                        backupManager.dummyTrigger.toggle()
+                                                    }
+                                                }
+                                            }) {
+                                                Image(systemName: "plus.circle.fill").font(.system(size: 20)).foregroundColor(.blue)
+                                            }
+                                            .buttonStyle(.plain)
+                                            Spacer()
                                         }
-                                        .buttonStyle(.plain)
-                                    }
-                                    .padding(.top, 6)
-                                }
-                                }
-                                .contextMenu {
-                                    if card.isTrusted {
-                                        Button(action: { backupManager.toggleTrust(for: card.url) }) {
-                                            Text(env.localized("revokeTrust"))
-                                            Image(systemName: "xmark.shield")
-                                        }
-                                    }
-                                    
-                                    Button(role: .destructive, action: { backupManager.ignoreDevice(for: card.url) }) {
-                                        Text(env.localized("ignoreDevice"))
-                                        Image(systemName: "eye.slash")
+                                        .padding(.vertical, 2)
                                     }
                                 }
                                 
@@ -404,7 +360,6 @@ struct BackupSettingsView: View {
     }
 }
 
-// 支持绘制原生进度条的提取组件
 struct PathSelector: View {
     @EnvironmentObject var env: AppEnvironment
     let titleKey: String
@@ -428,27 +383,16 @@ struct PathSelector: View {
                     if !spaceInfo.format.isEmpty {
                         Text(spaceInfo.format).font(.caption).padding(.horizontal, 4).padding(.vertical, 2).background(Color.secondary.opacity(0.2)).cornerRadius(4)
                     }
-                    
                     Text("\(env.localized("freeSpace")) \(spaceInfo.text) / \(String(format: "%.1f GB", spaceInfo.total)) (\(Int((1.0 - spaceInfo.usedPercent) * 100))%)")
                         .font(.caption)
                         .foregroundColor(spaceInfo.isWarning ? .red : .secondary)
-                    
-                    if spaceInfo.isWarning && spaceInfo.text != "" {
-                        Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.red).font(.caption)
-                        Text(env.localized("spaceWarn")).font(.caption).foregroundColor(.red)
-                    }
                     Spacer()
                 }
-                
-                // 空间百分比条
                 if spaceInfo.total > 0 {
                     GeometryReader { geo in
-                        let percent = spaceInfo.usedPercent
                         ZStack(alignment: .leading) {
                             Capsule().fill(Color.secondary.opacity(0.2)).frame(height: 6)
-                            Capsule()
-                                .fill(spaceInfo.isWarning ? Color.red : Color.blue)
-                                .frame(width: geo.size.width * CGFloat(percent), height: 6)
+                            Capsule().fill(spaceInfo.isWarning ? Color.red : Color.blue).frame(width: geo.size.width * CGFloat(spaceInfo.usedPercent), height: 6)
                         }
                     }
                     .frame(height: 6)
@@ -475,8 +419,7 @@ struct PathSelector: View {
         var checkPath = path
         var isDir: ObjCBool = false
         var iterations = 0
-        let maxIterations = 100
-        while !FileManager.default.fileExists(atPath: checkPath, isDirectory: &isDir) && iterations < maxIterations {
+        while !FileManager.default.fileExists(atPath: checkPath, isDirectory: &isDir) && iterations < 100 {
             let parent = URL(fileURLWithPath: checkPath).deletingLastPathComponent().path
             if parent == checkPath { break }
             checkPath = parent
@@ -486,29 +429,21 @@ struct PathSelector: View {
     }
 }
 
-// 拓展原有的 Free Space 以支持带进度条返回
 func getFreeSpacePercentage(forPath path: String) -> (text: String, isWarning: Bool, usedPercent: Double, total: Double, format: String) {
     if path.isEmpty { return ("", false, 0.0, 0.0, "") }
-
     var checkPath = path
-    var isDir: ObjCBool = false
     var iterations = 0
-    let maxIterations = 100
-    while !FileManager.default.fileExists(atPath: checkPath, isDirectory: &isDir) && iterations < maxIterations {
+    while !FileManager.default.fileExists(atPath: checkPath) && iterations < 100 {
         let parent = URL(fileURLWithPath: checkPath).deletingLastPathComponent().path
         if parent == checkPath { break }
         checkPath = parent
         iterations += 1
     }
-
     var format = ""
     let url = URL(fileURLWithPath: checkPath)
-    if let r = try? url.resourceValues(forKeys: [.volumeLocalizedFormatDescriptionKey]) {
-        if let fmt = r.volumeLocalizedFormatDescription {
-            format = fmt.replacingOccurrences(of: " (Encrypted)", with: "", options: .caseInsensitive).replacingOccurrences(of: "（已加密）", with: "")
-        }
+    if let r = try? url.resourceValues(forKeys: [.volumeLocalizedFormatDescriptionKey]), let fmt = r.volumeLocalizedFormatDescription {
+        format = fmt.replacingOccurrences(of: " (Encrypted)", with: "", options: .caseInsensitive).replacingOccurrences(of: "（已加密）", with: "")
     }
-
     do {
         let attrs = try FileManager.default.attributesOfFileSystem(forPath: checkPath)
         if let freeSize = attrs[.systemFreeSize] as? NSNumber, let sysTotal = attrs[.systemSize] as? NSNumber {
@@ -516,120 +451,80 @@ func getFreeSpacePercentage(forPath path: String) -> (text: String, isWarning: B
             let tGB = Double(sysTotal.int64Value) / 1_000_000_000.0
             let used = tGB - gigabytes
             let perc = tGB > 0 ? (used / tGB) : 0.0
-
-            let formatted = String(format: "%.1f GB", gigabytes)
-            let isWarning = gigabytes < 10.0 || (1.0 - perc) < 0.1 // 空间少于10G或少于10%变红
-
-            return (formatted, isWarning, perc, tGB, format)
+            return (String(format: "%.1f GB", gigabytes), gigabytes < 10.0 || (1.0 - perc) < 0.1, perc, tGB, format)
         }
-    } catch {
-        return ("", false, 0.0, 0.0, format)
-    }
+    } catch {}
     return ("", false, 0.0, 0.0, format)
 }
 
 struct AdvancedSettingsView: View {
-    @AppStorage("verifyChecksum") private var verifyChecksum: Bool = false
-    @AppStorage("sortFormats") private var sortFormats: Bool = false
-    @AppStorage("directoryTemplate") private var directoryTemplate: String = "{YYYY}-{MM}-{DD}/{MODEL}/{EXT}/"
+    @AppStorage("comparisonStrategy") private var comparisonStrategy: BackupComparisonStrategy = .updateIfModified
+    @AppStorage("enableVerification") private var enableVerification: Bool = false
+    @AppStorage("verificationLevel") private var verificationLevel: PostTransferVerificationLevel = .basic
+    @AppStorage("enableFileFilter") private var enableFileFilter: Bool = false
+    @AppStorage("fileFilterMode") private var fileFilterMode: FileFilterMode = .include
+    @AppStorage("allowedFileExtensions") private var allowedFileExtensions: String = "arw, cr2, cr3, jpg, heif, mov, mp4, xml"
     @AppStorage("ejectOnFinish") private var ejectOnFinish: Bool = false
     @AppStorage("openFinderOnFinish") private var openFinderOnFinish: Bool = true
     @AppStorage("autoMigrateFallback") private var autoMigrateFallback: Bool = true
-    @AppStorage("backupStrategy") private var backupStrategy: Int = 0
     @AppStorage("preventSleep") private var preventSleep: Bool = true
-    @AppStorage("checksumType") private var checksumType: Int = 0 
-    @AppStorage("enableFileFilter") private var enableFileFilter: Bool = false
-    @AppStorage("allowedFileExtensions") private var allowedFileExtensions: String = "arw, cr2, cr3, jpg, heif, mov, mp4, xml"
     
     @EnvironmentObject var env: AppEnvironment
     
     var body: some View {
-        VStack(spacing: 24) {
+        VStack(spacing: 0) {
             Form {
                 Section(header: LocalizedText("advancedPerf").font(.headline).foregroundColor(.primary)) {
-                    Picker(env.localized("backupStrategyTitle"), selection: $backupStrategy) {
-                        Text(env.localized("strategySizeDate")).tag(0)
-                        Text(env.localized("strategyIgnore")).tag(1)
+                    Picker(env.localized("backupStrategyTitle"), selection: $comparisonStrategy) {
+                        Text(env.localized("strategySizeDate")).tag(BackupComparisonStrategy.updateIfModified)
+                        Text(env.localized("strategyIgnore")).tag(BackupComparisonStrategy.skipIfExists)
                     }
                     .pickerStyle(.menu)
                     
-                    Toggle(isOn: $enableFileFilter) { LocalizedText("fileFilters") }
-                    if enableFileFilter {
-                        let formats = [
-                            ("ARW", env.localized("arwDesc")),
-                            ("CR3", env.localized("cr3Desc")),
-                            ("JPG", env.localized("jpgDesc")),
-                            ("HEIF", env.localized("heifDesc")),
-                            ("MP4", env.localized("mp4Desc")),
-                            ("XML", env.localized("xmlDesc")),
-                            ("XMP", env.localized("xmpDesc"))
-                        ]
-                        
-                        let cols = [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())]
-                        LazyVGrid(columns: cols, alignment: .leading, spacing: 8) {
-                            ForEach(formats, id: \.0) { fmt in
-                                Toggle(isOn: Binding(
-                                    get: { self.allowedFileExtensions.uppercased().contains(fmt.0) },
-                                    set: { isEnabled in
-                                        var exts = self.allowedFileExtensions.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).uppercased() }.filter { !$0.isEmpty }
-                                        if isEnabled {
-                                            if !exts.contains(fmt.0) { exts.append(fmt.0) }
-                                        } else {
-                                            exts.removeAll { $0 == fmt.0 }
-                                        }
-                                        self.allowedFileExtensions = exts.joined(separator: ", ")
-                                    }
-                                )) {
-                                    VStack(alignment: .leading) {
-                                        Text(fmt.0).font(.body)
-                                        Text(fmt.1).font(.caption2).foregroundColor(.secondary)
-                                    }
-                                }
-                            }
-                        }
-                        .padding(.vertical, 8)
-                        .padding(.leading, 18)
-                    }
-                    
-                    Toggle(isOn: $verifyChecksum) {
-                        VStack(alignment: .leading) {
-                            LocalizedText("verifyChecksum")
-                            LocalizedText("verifyChecksumHint").font(.caption).foregroundColor(.secondary)
+                    Toggle(isOn: $enableVerification.animation(.spring())) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            LocalizedText("enableVerification")
+                            LocalizedText("verifyChecksumHint").font(.caption2).foregroundColor(.secondary)
                         }
                     }
                     
-                    if verifyChecksum {
-                        Picker(env.localized("checksumType"), selection: $checksumType) {
-                            LocalizedText("checksumRsync").tag(0)
-                            LocalizedText("checksumMD5").tag(1)
-                            LocalizedText("checksumSHA256").tag(2)
+                    if enableVerification {
+                        Picker(env.localized("checksumType"), selection: $verificationLevel) {
+                            LocalizedText("verifBasic").tag(PostTransferVerificationLevel.basic)
+                            LocalizedText("verifMD5").tag(PostTransferVerificationLevel.md5)
+                            LocalizedText("verifSHA256").tag(PostTransferVerificationLevel.sha256)
                         }
                         .pickerStyle(.menu)
-                        .padding(.leading, 20)
+                        .padding(.leading, 12)
+                        .transition(.opacity)
+                    }
+                }
+                .padding(.bottom, 8)
+                    
+                Section(header: LocalizedText("fileFilters").font(.headline).foregroundColor(.primary)) {
+                    Toggle(isOn: $enableFileFilter.animation(.spring())) {
+                        LocalizedText("enableFileFilter")
                     }
                     
-                    Toggle(isOn: $preventSleep) { LocalizedText("preventSleep") }
-                    
-                    Toggle(isOn: $sortFormats) {
-                        VStack(alignment: .leading) {
-                            LocalizedText("sortFormats")
-                            LocalizedText("sortFormatsHint").font(.caption).foregroundColor(.secondary)
+                    if enableFileFilter {
+                        Picker(env.localized("fileFilterMode"), selection: $fileFilterMode) {
+                            LocalizedText("filterInclude").tag(FileFilterMode.include)
+                            LocalizedText("filterExclude").tag(FileFilterMode.exclude)
                         }
-                    }
-                    
-                    if sortFormats {
-                        HStack {
-                            LocalizedText("dirTemplate")
-                            TextField("", text: $directoryTemplate)
-                                .textFieldStyle(.roundedBorder)
-                        }
-                        .padding(.leading, 20)
+                        .pickerStyle(.segmented)
+                        .padding(.vertical, 4)
                         
-                        Text("支持变量: {YYYY}, {MM}, {DD}, {MAKE}, {MODEL}, {EXT}").font(.caption2).foregroundColor(.secondary).padding(.leading, 20)
+                        VStack(alignment: .leading, spacing: 4) {
+                            TextField(env.localized("filterHint"), text: $allowedFileExtensions)
+                                .textFieldStyle(.roundedBorder)
+                            LocalizedText("filterHint").font(.caption2).foregroundColor(.secondary)
+                        }
+                        .padding(.bottom, 4)
                     }
                 }
                 
-                Section(header: LocalizedText("advancedPost").font(.headline).foregroundColor(.primary).padding(.top, 16)) {
+                Section(header: LocalizedText("advancedPost").font(.headline).foregroundColor(.primary)) {
+                    Toggle(isOn: $preventSleep) { LocalizedText("preventSleep") }
                     Toggle(isOn: $ejectOnFinish) { LocalizedText("ejectFinish") }
                     Toggle(isOn: $openFinderOnFinish) { LocalizedText("finderFinish") }
                     Toggle(isOn: $autoMigrateFallback) { LocalizedText("migrateFallback") }
@@ -643,76 +538,58 @@ struct AdvancedSettingsView: View {
 struct LogsView: View {
     @ObservedObject var backupManager: BackupManager
     @EnvironmentObject var env: AppEnvironment
-    
     @State private var selectedLogID: BackupLog.ID?
     
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             if backupManager.backupHistory.isEmpty {
-                LocalizedText("noLogs")
-                    .foregroundColor(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                LocalizedText("noLogs").foregroundColor(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 Table(backupManager.backupHistory, selection: $selectedLogID) {
                     TableColumn(env.localized("timeCol")) { log in
-                        Text("\(log.date, style: .date) \(log.date, style: .time)")
-                            .font(.caption)
+                        Text("\(log.date, style: .date) \(log.date, style: .time)").font(.caption)
                     }
                     TableColumn(env.localized("sourceCol")) { log in
                         Text(log.sourceName).font(.caption)
                     }
                     TableColumn(env.localized("destCol")) { log in
-                        Text(log.destinationPath ?? "-")
-                            .font(.caption)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
+                        Text(log.destinationPath ?? "-").font(.caption).lineLimit(1).truncationMode(.middle)
                     }
                     TableColumn(env.localized("filesCol")) { log in
-                        Text("\(log.fileCount) \(env.localized("filesTx"))")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
+                        Text("\(log.fileCount) \(env.localized("filesTx"))").font(.caption).foregroundColor(.secondary)
                     }
                     TableColumn(env.localized("sizeCol")) { log in
-                        Text(log.dataTransferredStr)
-                            .font(.caption)
+                        Text(log.dataTransferredStr).font(.caption)
                     }
                     TableColumn(env.localized("durationCol")) { log in
-                        Text("\(Int(log.durationSeconds)) \(env.localized("sec"))")
-                            .font(.caption)
+                        Text("\(Int(log.durationSeconds)) \(env.localized("sec"))").font(.caption)
                     }
                     TableColumn(env.localized("statusCol")) { log in
                         let statusColor: Color = log.result == "成功" ? .green : (log.result == "无新文件" ? .secondary : .red)
-                        Text(log.result)
-                            .font(.caption)
-                            .foregroundColor(statusColor)
+                        Text(log.result).font(.caption).foregroundColor(statusColor)
                     }
                 }
                 .frame(minHeight: 300)
-                .contextMenu(forSelectionType: BackupLog.ID.self) { items in
-                    // Context menu empty
-                } primaryAction: { items in
-                    if let id = items.first, let log = backupManager.backupHistory.first(where: { $0.id == id }), let dest = log.destinationPath {
+                .contextMenu(forSelectionType: BackupLog.ID.self) { _ in
+                } primaryAction: { ids in
+                    if let id = ids.first,
+                       let log = backupManager.backupHistory.first(where: { $0.id == id }),
+                       let dest = log.destinationPath {
                         NSWorkspace.shared.open(URL(fileURLWithPath: dest))
                     }
                 }
             }
-            
             HStack {
                 Spacer()
                 Button(action: {
-                    guard let libraryURL = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first else {
-                        print("Error: Unable to locate Library directory")
-                        return
+                    let logDir = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first?.appendingPathComponent("Logs")
+                    let logURL = logDir?.appendingPathComponent("SDBackupApp.log")
+                    if let url = logURL, FileManager.default.fileExists(atPath: url.path) {
+                        NSWorkspace.shared.open(url)
+                    } else if let dir = logDir {
+                        NSWorkspace.shared.open(dir)
                     }
-                    let logURL = libraryURL.appendingPathComponent("Logs/SDBackupApp.log")
-                    if FileManager.default.fileExists(atPath: logURL.path) {
-                        NSWorkspace.shared.open(logURL)
-                    } else {
-                        NSWorkspace.shared.open(libraryURL.appendingPathComponent("Logs"))
-                    }
-                }) {
-                    Label(env.localized("openLogFolder"), systemImage: "doc.text.viewfinder")
-                }
+                }) { Label(env.localized("openLogFolder"), systemImage: "doc.text.viewfinder") }
                 Spacer()
             }
         }
@@ -723,7 +600,7 @@ struct OtherSettingsView: View {
     @EnvironmentObject var env: AppEnvironment
     @ObservedObject var backupManager: BackupManager
     @AppStorage("hideDockIcon") private var hideDockIcon: Bool = true
-    @AppStorage("autoStart") private var autoStart: Bool = false
+    @StateObject private var loginManager = LaunchAtLoginManager.shared
     @AppStorage("appLanguage") private var appLanguage: String = "zh-Hans"
     @State private var showingResetAlert = false
     
@@ -732,61 +609,33 @@ struct OtherSettingsView: View {
             Form {
                 Section(header: LocalizedText("otherLook").font(.headline).foregroundColor(.primary)) {
                     Toggle(isOn: $hideDockIcon) { LocalizedText("hideDock") }
-
                     VStack(alignment: .leading, spacing: 4) {
-                        Toggle(isOn: $autoStart) { LocalizedText("autoStart") }
-                            .disabled(true)
-                        Text(env.localized("autoStartDisabled"))
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
+                        Toggle(isOn: Binding(
+                            get: { loginManager.isEnabled },
+                            set: { _ in loginManager.toggle() }
+                        )) { LocalizedText("autoStart") }
+                        LocalizedText("autoStartDisabled").font(.caption2).foregroundColor(.secondary)
                     }
-
                     Picker(selection: $appLanguage, label: LocalizedText("lang")) {
                         Text("简体中文").tag("zh-Hans")
                         Text("English").tag("en")
                     }
                     .pickerStyle(.segmented)
-                    // 当切换时，AppEnvironment @AppStorage 自动更新触发通知
                 }
-                
                 Section(header: Text(env.localized("resetTitle")).font(.headline).foregroundColor(.red)) {
                     VStack(alignment: .leading, spacing: 10) {
-                        Text(env.localized("resetWarning"))
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                        
-                        Button(role: .destructive, action: {
-                            showingResetAlert = true
-                        }) {
-                            HStack {
-                                Image(systemName: "trash")
-                                Text(env.localized("resetBtn"))
-                            }
+                        Text(env.localized("resetWarning")).font(.caption).foregroundColor(.secondary)
+                        Button(role: .destructive, action: { showingResetAlert = true }) {
+                            HStack { Image(systemName: "trash"); Text(env.localized("resetBtn")) }
                         }
                         .alert(isPresented: $showingResetAlert) {
-                            Alert(
-                                title: Text(env.localized("resetTitle")),
-                                message: Text(env.localized("resetWarning")),
-                                primaryButton: .destructive(Text(env.localized("resetBtn"))) {
-                                    backupManager.resetAllSettings()
-                                },
-                                secondaryButton: .cancel()
-                            )
+                            Alert(title: Text(env.localized("resetTitle")), message: Text(env.localized("resetWarning")), primaryButton: .destructive(Text(env.localized("resetBtn"))) { backupManager.resetAllSettings() }, secondaryButton: .cancel())
                         }
                     }
                 }
-                
                 Section(header: LocalizedText("about").font(.headline).foregroundColor(.primary).padding(.top, 16)) {
-                    HStack {
-                        LocalizedText("version").foregroundColor(.secondary)
-                        Spacer()
-                        Text("0.8.0").foregroundColor(.secondary)
-                    }
-                    HStack {
-                        LocalizedText("developerKey").foregroundColor(.secondary)
-                        Spacer()
-                        Text("南洋Nayan").foregroundColor(.secondary)
-                    }
+                    HStack { LocalizedText("version").foregroundColor(.secondary); Spacer(); Text("0.8.0").foregroundColor(.secondary) }
+                    HStack { LocalizedText("developerKey").foregroundColor(.secondary); Spacer(); Text("南洋Nayan").foregroundColor(.secondary) }
                 }
             }
             .formStyle(.grouped)

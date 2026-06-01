@@ -47,6 +47,7 @@ class BackupManager: ObservableObject {
     }
     @Published var etaText: String = ""
     private var currentProcess: Process?
+    private var currentSourceVolumeURL: URL?
     private let sourcePathsKey = "deviceSourcePaths"
     private let ignoredDevicesKey = "ignoredDeviceIDs"
     private var ignoredDeviceIDs: Set<String> = []
@@ -136,7 +137,7 @@ class BackupManager: ObservableObject {
             }
             UserDefaults.standard.set(Array(self.trustedDeviceIDs), forKey: self.trustedDevicesKey)
             
-            // 更新对应卡片状态 (使用全局通知或重置数组触发)
+            // 更新对应卡片状态
             if let idx = self.connectedCards.firstIndex(where: { $0.url == url }) {
                 self.connectedCards[idx].isTrusted = self.trustedDeviceIDs.contains(deviceID)
                 // 强制触发 UI 刷新
@@ -244,24 +245,13 @@ class BackupManager: ObservableObject {
         var total: Int64 = 0
         var free: Int64 = 0
         
-        if Set(keys).isSubset(of: [.volumeNameKey, .volumeLocalizedFormatDescriptionKey, .volumeTotalCapacityKey, .volumeAvailableCapacityKey]) {
-            if let r = try? url.resourceValues(forKeys: [.volumeNameKey, .volumeLocalizedFormatDescriptionKey, .volumeTotalCapacityKey, .volumeAvailableCapacityKey]) {
-                if let vn = r.volumeName { name = vn }
-                if let fmt = r.volumeLocalizedFormatDescription { 
-                    format = fmt.replacingOccurrences(of: " (Encrypted)", with: "", options: .caseInsensitive).replacingOccurrences(of: "（已加密）", with: "") 
-                }
-                if let cap = r.volumeTotalCapacity { total = Int64(cap) }
-                if let avail = r.volumeAvailableCapacity { free = Int64(avail) }
+        if let r = try? url.resourceValues(forKeys: Set(keys)) {
+            if let vn = r.volumeName { name = vn }
+            if let fmt = r.volumeLocalizedFormatDescription { 
+                format = fmt.replacingOccurrences(of: " (Encrypted)", with: "", options: .caseInsensitive).replacingOccurrences(of: "（已加密）", with: "") 
             }
-        } else {
-            if let r = try? url.resourceValues(forKeys: Set(keys)) {
-                if let vn = r.volumeName { name = vn }
-                if let fmt = r.volumeLocalizedFormatDescription { 
-                    format = fmt.replacingOccurrences(of: " (Encrypted)", with: "", options: .caseInsensitive).replacingOccurrences(of: "（已加密）", with: "") 
-                }
-                if let cap = r.volumeTotalCapacity { total = Int64(cap) }
-                if let avail = r.volumeAvailableCapacity { free = Int64(avail) }
-            }
+            if let cap = r.volumeTotalCapacity { total = Int64(cap) }
+            if let avail = r.volumeAvailableCapacity { free = Int64(avail) }
         }
         
         let deviceID = url.lastPathComponent
@@ -297,21 +287,22 @@ class BackupManager: ObservableObject {
             guard let self = self else { return }
             if let volumeURL = notification.userInfo?[NSWorkspace.volumeURLUserInfoKey] as? URL {
                 self.removeCard(url: volumeURL)
+                if self.isWorking, self.currentSourceVolumeURL == volumeURL {
+                    self.cancelTransfer()
+                    self.sendNotification(titleKey: "appName", body: "⚠️ 存储卡在传输过程中被意外拔出！请重新插入后重试。", isSuccess: false)
+                    self.addLog(BackupLog(date: Date(), sourceName: volumeURL.lastPathComponent, destinationPath: "", dataTransferredStr: "0 MB", fileCount: 0, durationSeconds: 0, result: "意外中断 (拔出)"))
+                }
             }
         }
     }
     
     private func isPotentialMemoryCard(at url: URL) -> Bool {
-        // 1. 基本排除：根分区、系统分区、已忽略的设备
         if url.path == "/" || url.path == "/System/Volumes/Data" { return false }
         let deviceID = url.lastPathComponent
         if ignoredDeviceIDs.contains(deviceID) { return false }
         
         let keys: [URLResourceKey] = [.volumeIsInternalKey, .volumeIsEjectableKey, .volumeIsRemovableKey, .volumeNameKey, .volumeTotalCapacityKey, .volumeLocalizedFormatDescriptionKey]
-        guard let values = try? url.resourceValues(forKeys: Set(keys)) else {
-            print("DEBUG: Failed to get resource values for \(url.path)")
-            return false
-        }
+        guard let values = try? url.resourceValues(forKeys: Set(keys)) else { return false }
         
         let isInternal = values.volumeIsInternal ?? true
         let isEjectable = values.volumeIsEjectable ?? false
@@ -320,59 +311,43 @@ class BackupManager: ObservableObject {
         let totalCapacity = Int64(values.volumeTotalCapacity ?? 0)
         let format = values.volumeLocalizedFormatDescription ?? ""
         
-        print("DEBUG: Checking volume: \(name) [\(url.path)] | Internal: \(isInternal) | Ejectable: \(isEjectable) | Removable: \(isRemovable) | Cap: \(totalCapacity / 1_000_000_000) GB | Format: \(format)")
-        
-        // 2. 强力排除规则：内置硬盘直接过滤
         if isInternal && url.path == "/" { return false }
         
-        // 3. 排除明确的备份盘和 Time Machine
         let lowerName = name.lowercased()
         if lowerName.contains("time machine") || lowerName.contains("backup") || lowerName.contains("tm-") || lowerName.contains("time-machine") {
-            print("DEBUG: Skipping backup drive by name: \(name)")
             return false
         }
         
-        // 4. 文件系统判定：SD 卡通常为 ExFAT 或 FAT32。APFS/HFS+ 通常是移动硬盘或系统盘。
         let lowerFormat = format.lowercased()
         let isAppleFormat = lowerFormat.contains("apfs") || lowerFormat.contains("mac os extended") || lowerFormat.contains("hfs")
         
-        // 5. 核心判定规则 A：物理可移除介质 (USB 读卡器里的 SD/CF 卡) -> 允许
         if isRemovable && isEjectable { return true }
         
-        // 6. 核心判定规则 B：对于非 Removable 但 Ejectable 的设备 (雷电读卡器、移动 SSD)
         if isEjectable {
-            // 如果是苹果专有格式 (APFS/HFS) 且没有 Removable 标记，绝大概率是移动硬盘
             if isAppleFormat {
-                // 除非极其明确有相机文件夹，否则视为硬盘排除
                 let cameraPaths = ["DCIM", "PRIVATE", "VIDEO", "CLIP", "AVCHD"]
                 for p in cameraPaths {
                     if FileManager.default.fileExists(atPath: url.appendingPathComponent(p).path) {
                         return true
                     }
                 }
-                print("DEBUG: Skipping Apple-formatted external drive without camera folders: \(name)")
                 return false
             }
 
-            // 容量判定 (摄影存储卡通常不会超过 1TB)
-            // 使用 1.1TB 作为阈值，留出一些余量（1TB = 1_000_000_000_000 bytes）
             let capacityThreshold: Int64 = 1_100_000_000_000
             if totalCapacity > capacityThreshold {
-                // 同上，除非有相机目录
                 let cameraPaths = ["DCIM", "PRIVATE", "VIDEO", "CLIP", "AVCHD"]
                 for p in cameraPaths {
                     if FileManager.default.fileExists(atPath: url.appendingPathComponent(p).path) {
                         return true
                     }
                 }
-                print("DEBUG: Skipping large external drive (>1TB) without camera folders: \(name)")
                 return false
             }
             
             return true
         }
         
-        // 兜底判定
         if url.path.hasPrefix("/Volumes/") && !isAppleFormat {
             return true
         }
@@ -403,7 +378,6 @@ class BackupManager: ObservableObject {
                     }
                 }
             }
-            // Silent migrate fallback on target mount check...
         }
         
         let userDefaults = UserDefaults.standard
@@ -455,7 +429,6 @@ class BackupManager: ObservableObject {
         let isTargetAvailable = !targetPath.isEmpty && FileManager.default.fileExists(atPath: targetPath)
         let fallbackPath = getFallbackPath()
         
-        // "目标文件夹不要用日期进行命名" -> Remove date component entirely
         let destination: String
         if isTargetAvailable {
             destination = targetPath
@@ -470,52 +443,78 @@ class BackupManager: ObservableObject {
         self.runRsync(sources: sourceURLs.map { $0.path }, destination: destination, actionNameKey: "working", sourceName: sourceName, isMigrating: false, sourceVolumeURL: volumeURL)
     }
     
-    private func runRsync(sources: [String], destination: String, actionNameKey: String, sourceName: String, isMigrating: Bool, sourceVolumeURL: URL?) {
-        guard !isWorking else {
-            print("Already working, ignoring trigger.")
-            return
+    private func buildRsyncFilterArgs(mode: FileFilterMode, extensions: String) -> [String] {
+        let extArray = extensions.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).lowercased() }.filter { !$0.isEmpty }
+        guard !extArray.isEmpty else { return [] }
+        
+        var filterArgs: [String] = []
+        
+        if mode == .include {
+            filterArgs.append("--include=*/") // Include all directories to traverse
+            for ext in extArray {
+                let baseExt = ext.hasPrefix(".") ? String(ext.dropFirst()) : ext
+                filterArgs.append("--include=*.\(baseExt)")
+                filterArgs.append("--include=*.\(baseExt.uppercased())")
+            }
+            filterArgs.append("--exclude=*") // Exclude everything else
+        } else {
+            // Exclude mode
+            for ext in extArray {
+                let baseExt = ext.hasPrefix(".") ? String(ext.dropFirst()) : ext
+                filterArgs.append("--exclude=*.\(baseExt)")
+                filterArgs.append("--exclude=*.\(baseExt.uppercased())")
+            }
         }
         
+        return filterArgs
+    }
+    
+    private func runRsync(sources: [String], destination: String, actionNameKey: String, sourceName: String, isMigrating: Bool, sourceVolumeURL: URL?) {
+        guard !isWorking else { return }
         guard !sources.isEmpty else { return }
         
         if !FileManager.default.fileExists(atPath: destination) {
-            do {
-                try FileManager.default.createDirectory(atPath: destination, withIntermediateDirectories: true, attributes: nil)
-            } catch {
-                print("Failed to create destination: \(error)")
-                return
-            }
+            try? FileManager.default.createDirectory(atPath: destination, withIntermediateDirectories: true, attributes: nil)
         }
         
         DispatchQueue.main.async {
             self.isWorking = true
+            self.currentSourceVolumeURL = sourceVolumeURL
             self.currentActionTextKey = actionNameKey
             self.progressPercent = 0.0
-            self.progressDetailText = "" // Let L10n handle the calculating state text later
+            self.progressDetailText = "" 
             self.etaText = ""
         }
         
         let startTime = Date()
+        let defaults = UserDefaults.standard
+        let enableVerif = defaults.bool(forKey: "enableVerification")
+        let verifLevel = PostTransferVerificationLevel(rawValue: defaults.integer(forKey: "verificationLevel")) ?? .basic
+        let strategy = BackupComparisonStrategy(rawValue: defaults.integer(forKey: "comparisonStrategy")) ?? .updateIfModified
         
-        let verifyChecksum = UserDefaults.standard.bool(forKey: "verifyChecksum")
-        let sortFormats = UserDefaults.standard.bool(forKey: "sortFormats")
-        let ejectOnFinish = UserDefaults.standard.bool(forKey: "ejectOnFinish")
-        let openFinderOnFinish = UserDefaults.standard.bool(forKey: "openFinderOnFinish")
+        let enableFilter = defaults.bool(forKey: "enableFileFilter")
+        let filterMode = FileFilterMode(rawValue: defaults.integer(forKey: "fileFilterMode")) ?? .include
+        let filterExtensions = defaults.string(forKey: "allowedFileExtensions") ?? ""
         
-        // 我们用 -n 跑一遍空转获取总数据量来实现真正的进度条（牺牲几秒钟时间换取体验）
+        let ejectOnFinish = defaults.bool(forKey: "ejectOnFinish")
+        let openFinderOnFinish = defaults.bool(forKey: "openFinderOnFinish")
+        let preventSleep = defaults.bool(forKey: "preventSleep")
+
         DispatchQueue.global(qos: .userInitiated).async {
             var totalFilesToTransfer: Int = 0
             
+            // --- Dry Run ---
             let dryRunProcess = Process()
             dryRunProcess.executableURL = URL(fileURLWithPath: "/usr/bin/rsync")
-            var dryArgs = ["-avn", "--out-format=%i"]
-            if verifyChecksum { dryArgs.append("--checksum") }
+            var dryArgs = ["-an", "--whole-file", "--out-format=%i"] // -n for dry run, -W for whole-file performance
             
-            for s in sources {
-                let sourcePath = s.hasSuffix("/") ? s : s + "/"
-                dryArgs.append(sourcePath)
-            }
+            if enableVerif && verifLevel != .basic { dryArgs.append("--checksum") }
+            if strategy == .skipIfExists { dryArgs.append("--ignore-existing") } else { dryArgs.append("-u") }
             
+            let filterArgs = enableFilter ? self.buildRsyncFilterArgs(mode: filterMode, extensions: filterExtensions) : []
+            dryArgs.append(contentsOf: filterArgs)
+            
+            for s in sources { dryArgs.append(s) }
             dryArgs.append(destination)
             dryRunProcess.arguments = dryArgs
             
@@ -528,63 +527,41 @@ class BackupManager: ObservableObject {
                 if let str = String(data: data, encoding: .utf8) {
                     let lines = str.components(separatedBy: .newlines)
                     for line in lines where !line.isEmpty {
-                        if line.starts(with: ">f") || line.starts(with: "<f") || line.starts(with: "c") {
+                        // %i flags: > (sent), < (received), c (checksum/attribute change), f (file)
+                        // It must contain 'f' and one of the transfer symbols.
+                        if (line.contains(">f") || line.contains("<f") || line.contains("cf")) && !line.contains(".f") {
                             totalFilesToTransfer += 1
                         }
                     }
                 }
                 dryRunProcess.waitUntilExit()
-            } catch {
-                print("Dry run failed: \(error)")
-            }
+            } catch { print("Dry run failed: \(error)") }
             
             if totalFilesToTransfer == 0 {
                 DispatchQueue.main.async {
                     self.isWorking = false
-                    let log = BackupLog(date: Date(), sourceName: sourceName, destinationPath: destination, dataTransferredStr: "0 MB", fileCount: 0, durationSeconds: 0, result: "无新文件")
-                    self.addLog(log)
+                    self.addLog(BackupLog(date: Date(), sourceName: sourceName, destinationPath: destination, dataTransferredStr: "0 MB", fileCount: 0, durationSeconds: 0, result: "无新文件"))
                 }
                 return
             }
             
-            // 真实运行 rsync 
+            // --- Real Run ---
             let process = Process()
             self.currentProcess = process
-            
             process.executableURL = URL(fileURLWithPath: "/usr/bin/script")
-            let strategy = UserDefaults.standard.integer(forKey: "backupStrategy")
-            var args = ["-q", "/dev/null", "/usr/bin/rsync", "-av", "--out-format=%i %n %l"]
-            if strategy == 1 {
-                args.append("--ignore-existing")
-            } else {
-                args.append("-u") 
-            }
             
-            if verifyChecksum { args.append("--checksum") }
+            // -a (archive), -W (whole-file)
+            var args = ["-q", "/dev/null", "/usr/bin/rsync", "-aW", "--out-format=%i %n %l"]
+            
+            if strategy == .skipIfExists { args.append("--ignore-existing") } else { args.append("-u") }
+            if enableVerif && verifLevel != .basic { args.append("--checksum") }
             if isMigrating { args.append("--remove-source-files") }
-            args.append("--partial")
             
-            // 安全覆盖策略：保留冲突文件
+            args.append("--partial")
             args.append("--backup")
             args.append("--suffix=_\(Int(Date().timeIntervalSince1970))")
             
-            let preventSleep = UserDefaults.standard.bool(forKey: "preventSleep")
-            if preventSleep {
-                self.sleepPreventer.startPreventingSleep(reason: "SD Backup: \(sourceName)")
-            }
-            
-            if UserDefaults.standard.bool(forKey: "enableFileFilter") {
-                let extsStr = UserDefaults.standard.string(forKey: "allowedFileExtensions") ?? ""
-                let extArray = extsStr.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).lowercased() }.filter { !$0.isEmpty }
-                if !extArray.isEmpty {
-                    args.append("--include=*/")
-                    for ext in extArray {
-                        args.append("--include=*.\(ext)")
-                        args.append("--include=*.\(ext.uppercased())")
-                    }
-                    args.append("--exclude=*")
-                }
-            }
+            args.append(contentsOf: filterArgs)
             
             for s in sources { args.append(s) }
             args.append(destination)
@@ -599,6 +576,8 @@ class BackupManager: ObservableObject {
             var copiedFilesCount: Int = 0
             var errorOutput = ""
             
+            if preventSleep { self.sleepPreventer.startPreventingSleep(reason: "SD Backup: \(sourceName)") }
+            
             errorPipe.fileHandleForReading.readabilityHandler = { handle in
                 let data = handle.availableData
                 if let str = String(data: data, encoding: .utf8) { errorOutput += str }
@@ -608,33 +587,21 @@ class BackupManager: ObservableObject {
                 let data = handle.availableData
                 guard !data.isEmpty, let str = String(data: data, encoding: .utf8) else { return }
                 let lines = str.components(separatedBy: .newlines)
-                for line in lines where !line.isEmpty {
-                    let parts = line.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: true)
-                    if parts.count == 3 {
-                        let flags = String(parts[0])
-                        if flags.starts(with: ">f") || flags.starts(with: "<f") || flags.starts(with: "c") {
+                    for line in lines where !line.isEmpty {
+                        let parts = line.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: true)
+                        if parts.count == 3 {
+                            let flags = String(parts[0])
+                            if (flags.contains(">f") || flags.contains("<f") || flags.contains("cf")) && !flags.contains(".f") {
                             if let size = Int64(parts[2]) {
                                 transferredBytes += size
                                 copiedFilesCount += 1
                                 let elapsed = Date().timeIntervalSince(startTime)
-                                let speed = elapsed > 0 ? Double(transferredBytes) / elapsed : 0
                                 let percent = min(Double(copiedFilesCount) / Double(totalFilesToTransfer), 1.0)
-                                
-                                var etaStr = ""
-                                if percent > 0 && percent < 1.0 {
-                                    let estTotalTime = elapsed / percent
-                                    let remainSeconds = max(0, estTotalTime - elapsed)
-                                    if remainSeconds > 60 {
-                                        etaStr = String(format: "%d分%d秒", Int(remainSeconds)/60, Int(remainSeconds)%60)
-                                    } else {
-                                        etaStr = String(format: "%d秒", Int(remainSeconds))
-                                    }
-                                }
+                                let speed = elapsed > 0 ? Double(transferredBytes) / elapsed : 0
                                 
                                 DispatchQueue.main.async {
                                     self.progressPercent = percent
                                     self.progressDetailText = String(format: "已传 %d/%d (%.1f MB/s)  %d%%", copiedFilesCount, totalFilesToTransfer, speed / 1_000_000, Int(percent * 100))
-                                    self.etaText = etaStr
                                 }
                             }
                         }
@@ -652,31 +619,18 @@ class BackupManager: ObservableObject {
                 let duration = Date().timeIntervalSince(startTime)
                 
                 if exitStatus == 0 {
-                    if isMigrating {
-                        for s in sources { self.cleanEmptyDirectories(at: s) }
-                    }
-                    if !isMigrating && sortFormats && copiedFilesCount > 0 {
-                        self.organizeFormatsWithTemplate(in: destination)
-                    }
-                    
+                    if isMigrating { for s in sources { self.cleanEmptyDirectories(at: s) } }
                     if openFinderOnFinish && copiedFilesCount > 0 {
-                        DispatchQueue.main.async {
-                            NSWorkspace.shared.open(URL(fileURLWithPath: destination))
-                        }
+                        DispatchQueue.main.async { NSWorkspace.shared.open(URL(fileURLWithPath: destination)) }
                     }
-                    
-                    if ejectOnFinish && !isMigrating, let url = sourceVolumeURL {
-                        self.ejectCard(url: url)
-                    }
+                    if ejectOnFinish && !isMigrating, let url = sourceVolumeURL { self.ejectCard(url: url) }
                     
                     let transferredMB = Double(transferredBytes) / 1_000_000
                     let dataStr = transferredMB > 1000 ? String(format: "%.2f GB", transferredMB / 1000) : String(format: "%.1f MB", transferredMB)
                     let statMsg = "已检查 \(totalFilesToTransfer) 个文件，新增备份 \(copiedFilesCount) 个文件 (\(dataStr))"
                     
                     self.sendNotification(titleKey: "appName", body: "\(sourceName) 备份完成: \(statMsg)", isSuccess: true)
-                    
-                    let log = BackupLog(date: Date(), sourceName: sourceName, destinationPath: destination, dataTransferredStr: dataStr, fileCount: copiedFilesCount, durationSeconds: duration, result: "成功 (\(statMsg))")
-                    self.addLog(log)
+                    self.addLog(BackupLog(date: Date(), sourceName: sourceName, destinationPath: destination, dataTransferredStr: dataStr, fileCount: copiedFilesCount, durationSeconds: duration, result: "成功 (\(statMsg))"))
                 } else {
                     var errorReason = "任务出错 (Exit: \(exitStatus))"
                     if exitStatus == 12 { errorReason = "存储空间不足" }
@@ -684,108 +638,24 @@ class BackupManager: ObservableObject {
                     else if exitStatus == 20 { errorReason = "用户手动取消" }
                     else if exitStatus == 21 { errorReason = "校验异常 (Checksum Error)" }
                     
-                    if !errorOutput.isEmpty {
-                        print("Rsync Error: \(errorOutput)")
-                    }
-                    
-                    if exitStatus != 20 { // 忽略手动取消的通知
+                    if !errorOutput.isEmpty { print("Rsync Error: \(errorOutput)") }
+                    if exitStatus != 20 { 
                         self.sendNotification(titleKey: "appName", body: "⚠️ 备份异常: \(sourceName) - \(errorReason)", isSuccess: false)
                     }
-                    
-                    let log = BackupLog(date: Date(), sourceName: sourceName, destinationPath: destination, dataTransferredStr: "0 MB", fileCount: 0, durationSeconds: duration, result: "失败 (\(errorReason))")
-                    self.addLog(log)
+                    self.addLog(BackupLog(date: Date(), sourceName: sourceName, destinationPath: destination, dataTransferredStr: "0 MB", fileCount: 0, durationSeconds: duration, result: "失败 (\(errorReason))"))
                 }
             } catch {
                 print("Failed to run rsync: \(error)")
-                pipe.fileHandleForReading.readabilityHandler = nil
-                errorPipe.fileHandleForReading.readabilityHandler = nil
-                let log = BackupLog(date: Date(), sourceName: sourceName, destinationPath: destination, dataTransferredStr: "0 MB", fileCount: 0, durationSeconds: 0, result: "系统错误")
-                self.addLog(log)
+                self.addLog(BackupLog(date: Date(), sourceName: sourceName, destinationPath: destination, dataTransferredStr: "0 MB", fileCount: 0, durationSeconds: 0, result: "系统错误"))
             }
             
             self.sleepPreventer.stopPreventingSleep()
             DispatchQueue.main.async {
                 self.isWorking = false
                 self.currentProcess = nil
-                print("Backup finished with status: \(process.terminationStatus)")
+                self.currentSourceVolumeURL = nil
             }
         }
-    }
-    
-    // EXIF Template 抽取系统
-    private func organizeFormatsWithTemplate(in directoryPath: String) {
-        let fm = FileManager.default
-        let url = URL(fileURLWithPath: directoryPath)
-        
-        let templateStr = UserDefaults.standard.string(forKey: "directoryTemplate") ?? "{YYYY}-{MM}-{DD}/{MODEL}/{EXT}/"
-        _ = "{EXT}/" // 兜底
-        
-        guard let enumerator = fm.enumerator(at: url, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) else { return }
-        
-        for case let fileURL as URL in enumerator {
-            // 跳过已经是嵌套进入了子层级的文件 
-            // 简单逻辑：直接遍历根下第一层的项如果是一个有效文件就挪动到相对根指定的层级里
-            if fileURL.deletingLastPathComponent().path != directoryPath { continue }
-            
-            let ext = fileURL.pathExtension.uppercased()
-            if ext.isEmpty { continue }
-            
-            // 解析元数据
-            var yyyy = "Unknown"
-            var mm = "XX"
-            var dd = "XX"
-            var make = "Unknown"
-            var model = "Unknown"
-            
-            if let imgSource = CGImageSourceCreateWithURL(fileURL as CFURL, nil),
-               let props = CGImageSourceCopyPropertiesAtIndex(imgSource, 0, nil) as? [String: Any] {
-                
-                // 解析 TIFF 提取相机型号
-                if let tiff = props["{TIFF}"] as? [String: Any] {
-                    if let mkr = tiff["Make"] as? String { make = mkr.trimmingCharacters(in: .whitespaces) }
-                    if let mdl = tiff["Model"] as? String { model = mdl.trimmingCharacters(in: .whitespaces) }
-                }
-                
-                // 解析 EXIF 取拍摄时间 "2023:10:25 12:30:45"
-                if let exif = props["{Exif}"] as? [String: Any],
-                   let dtOriginal = exif["DateTimeOriginal"] as? String {
-                    let parts = dtOriginal.split(separator: " ")
-                    if let datePart = parts.first {
-                        let dps = datePart.split(separator: ":")
-                        if dps.count == 3 {
-                            yyyy = String(dps[0])
-                            mm = String(dps[1])
-                            dd = String(dps[2])
-                        }
-                    }
-                }
-            }
-            
-            var generatedTemplate = templateStr
-                .replacingOccurrences(of: "{YYYY}", with: yyyy)
-                .replacingOccurrences(of: "{MM}", with: mm)
-                .replacingOccurrences(of: "{DD}", with: dd)
-                .replacingOccurrences(of: "{MAKE}", with: make)
-                .replacingOccurrences(of: "{MODEL}", with: model)
-                .replacingOccurrences(of: "{EXT}", with: ext)
-            
-            // 防御性处理，去除多余斜杠
-            generatedTemplate = (generatedTemplate as NSString).standardizingPath
-            
-            let destFolderURL = url.appendingPathComponent(generatedTemplate)
-            try? fm.createDirectory(at: destFolderURL, withIntermediateDirectories: true)
-            let destFile = destFolderURL.appendingPathComponent(fileURL.lastPathComponent)
-            
-            if !fm.fileExists(atPath: destFile.path) {
-                do {
-                    try fm.moveItem(at: fileURL, to: destFile)
-                } catch {
-                    print("Failed to move file \(fileURL.lastPathComponent): \(error.localizedDescription)")
-                }
-            }
-        }
-        
-        self.cleanEmptyDirectories(at: directoryPath)
     }
     
     private func cleanEmptyDirectories(at path: String) {
