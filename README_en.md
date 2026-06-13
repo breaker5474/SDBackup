@@ -1,7 +1,7 @@
 # SDBackup
 
-[![zh](https://img.shields.io/badge/lang-简体中文-blue.svg)](README.md)
-[![en](https://img.shields.io/badge/lang-English-red.svg)](README_en.md)
+[![zh](https://img.shields.io/badge/简体中文-blue.svg)](README.md)
+[![en](https://img.shields.io/badge/English-red.svg)](README_en.md)
 
 macOS menu bar application for automatic SD card backup. Designed for photographers and videographers who need reliable, hands-free transfer of photos and videos from camera storage cards to your Mac.
 

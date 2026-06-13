@@ -1,7 +1,7 @@
 # SDBackup
 
-[![zh](https://img.shields.io/badge/lang-简体中文-blue.svg)](README.md)
-[![en](https://img.shields.io/badge/lang-English-red.svg)](README_en.md)
+[![zh](https://img.shields.io/badge/简体中文-blue.svg)](README.md)
+[![en](https://img.shields.io/badge/English-red.svg)](README_en.md)
 
 macOS 菜单栏应用，用于 SD 卡自动备份。面向摄影师和视频创作者，将相机存储卡中的照片和视频可靠地传输到 Mac。
 
