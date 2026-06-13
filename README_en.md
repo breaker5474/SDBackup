@@ -121,3 +121,6 @@ MIT
 ## Developer
 
 NanYang (南洋NanYang)
+
+- WeChat: Nany8753
+- Email: breaker5474@gmail.com

@@ -121,3 +121,6 @@ MIT
 ## 开发者
 
 南洋NanYang
+
+- 微信：Nany8753
+- 邮箱：breaker5474@gmail.com
