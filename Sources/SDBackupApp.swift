@@ -317,9 +317,9 @@ struct BackupSettingsView: View {
                                             .padding(.leading, 4)
                                         
                                         HStack(spacing: 8) {
-                                            if !card.selectedSourcePaths.isEmpty {
-                                                ScrollView(.horizontal, showsIndicators: false) {
-                                                    HStack(spacing: 6) {
+                                            ScrollView(.horizontal, showsIndicators: false) {
+                                                HStack(spacing: 6) {
+                                                    if !card.selectedSourcePaths.isEmpty {
                                                         ForEach(card.selectedSourcePaths, id: \.self) { p in
                                                             HStack(spacing: 4) {
                                                                 Text(URL(fileURLWithPath: p).lastPathComponent).font(.subheadline)
@@ -337,36 +337,35 @@ struct BackupSettingsView: View {
                                                             .padding(.leading, 10).padding(.trailing, 6).padding(.vertical, 5)
                                                             .background(Color.blue.opacity(0.1)).cornerRadius(8)
                                                         }
+                                                    } else {
+                                                        Text(env.localized("noSources")).font(.caption).foregroundColor(.secondary).padding(.leading, 4)
                                                     }
-                                                }
-                                            } else {
-                                                Text(env.localized("noSources")).font(.caption).foregroundColor(.secondary).padding(.leading, 4)
-                                            }
-                                            
-                                            Button(action: {
-                                                let panel = NSOpenPanel()
-                                                panel.canChooseFiles = false
-                                                panel.canChooseDirectories = true
-                                                panel.allowsMultipleSelection = true
-                                                panel.directoryURL = card.url
-                                                panel.title = env.localized("addSource")
-                                                if panel.runModal() == .OK {
-                                                    let newPaths = panel.urls.map { $0.path }
-                                                    if let idx = backupManager.connectedCards.firstIndex(where: { $0.url == card.url }) {
-                                                        var currentPaths = backupManager.connectedCards[idx].selectedSourcePaths
-                                                        for p in newPaths {
-                                                            if !currentPaths.contains(p) { currentPaths.append(p) }
+                                                    
+                                                    Button(action: {
+                                                        let panel = NSOpenPanel()
+                                                        panel.canChooseFiles = false
+                                                        panel.canChooseDirectories = true
+                                                        panel.allowsMultipleSelection = true
+                                                        panel.directoryURL = card.url
+                                                        panel.title = env.localized("addSource")
+                                                        if panel.runModal() == .OK {
+                                                            let newPaths = panel.urls.map { $0.path }
+                                                            if let idx = backupManager.connectedCards.firstIndex(where: { $0.url == card.url }) {
+                                                                var currentPaths = backupManager.connectedCards[idx].selectedSourcePaths
+                                                                for p in newPaths {
+                                                                    if !currentPaths.contains(p) { currentPaths.append(p) }
+                                                                }
+                                                                backupManager.connectedCards[idx].selectedSourcePaths = currentPaths
+                                                                backupManager.saveSourcePaths(for: backupManager.connectedCards[idx])
+                                                                backupManager.dummyTrigger.toggle()
+                                                            }
                                                         }
-                                                        backupManager.connectedCards[idx].selectedSourcePaths = currentPaths
-                                                        backupManager.saveSourcePaths(for: backupManager.connectedCards[idx])
-                                                        backupManager.dummyTrigger.toggle()
+                                                    }) {
+                                                        Image(systemName: "plus.circle.fill").font(.system(size: 20)).foregroundColor(.blue)
                                                     }
+                                                    .buttonStyle(.plain)
                                                 }
-                                            }) {
-                                                Image(systemName: "plus.circle.fill").font(.system(size: 20)).foregroundColor(.blue)
                                             }
-                                            .buttonStyle(.plain)
-                                            Spacer()
                                         }
                                         .padding(.vertical, 2)
                                     }
@@ -690,14 +689,11 @@ struct OtherSettingsView: View {
                     .pickerStyle(.segmented)
                 }
                 Section(header: Text(env.localized("resetTitle")).font(.headline).foregroundColor(.red)) {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text(env.localized("resetWarning")).font(.caption).foregroundColor(.secondary)
-                        Button(role: .destructive, action: { showingResetAlert = true }) {
-                            HStack { Image(systemName: "trash"); Text(env.localized("resetBtn")) }
-                        }
-                        .alert(isPresented: $showingResetAlert) {
-                            Alert(title: Text(env.localized("resetTitle")), message: Text(env.localized("resetConfirm")), primaryButton: .destructive(Text(env.localized("resetBtn"))) { backupManager.resetAllSettings() }, secondaryButton: .cancel())
-                        }
+                    Button(role: .destructive, action: { showingResetAlert = true }) {
+                        HStack { Image(systemName: "trash"); Text(env.localized("resetBtn")) }
+                    }
+                    .alert(isPresented: $showingResetAlert) {
+                        Alert(title: Text(env.localized("resetTitle")), message: Text(env.localized("resetWarning")), primaryButton: .destructive(Text(env.localized("resetBtn"))) { backupManager.resetAllSettings() }, secondaryButton: .cancel())
                     }
                 }
                 Section(header: LocalizedText("about").font(.headline).foregroundColor(.primary).padding(.top, 16)) {
@@ -710,7 +706,7 @@ struct OtherSettingsView: View {
                             Spacer()
                         }
                     }
-                    HStack { LocalizedText("developerKey").foregroundColor(.secondary); Spacer(); Text("南洋Nayan").foregroundColor(.secondary) }
+                    HStack { LocalizedText("developerKey").foregroundColor(.secondary); Spacer(); Text("南洋NanYang").foregroundColor(.secondary) }
                 }
             }
             .formStyle(.grouped)

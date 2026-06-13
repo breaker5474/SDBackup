@@ -1,6 +1,9 @@
 # Build artifacts
 .build/
+build/
 DerivedData/
+icon_preview.png
+icon_1024.png
 
 # Swift Package Manager
 .swiftpm/
