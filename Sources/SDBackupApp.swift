@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 @main
 struct SDBackupApp: App {
@@ -644,6 +645,17 @@ struct LogsView: View {
                         NSWorkspace.shared.open(dir)
                     }
                 }) { Label(env.localized("openLogFolder"), systemImage: "doc.text.viewfinder") }
+                
+                Button(action: {
+                    let csv = backupManager.exportLogs()
+                    let panel = NSSavePanel()
+                    panel.title = env.localized("exportLogs")
+                    panel.allowedContentTypes = [.commaSeparatedText]
+                    panel.nameFieldStringValue = "SDBackup_Logs.csv"
+                    if panel.runModal() == .OK, let url = panel.url {
+                        try? csv.write(to: url, atomically: true, encoding: .utf8)
+                    }
+                }) { Label(env.localized("exportLogs"), systemImage: "square.and.arrow.up") }
                 Spacer()
             }
         }
@@ -656,6 +668,7 @@ struct OtherSettingsView: View {
     @AppStorage("hideDockIcon") private var hideDockIcon: Bool = true
     @StateObject private var loginManager = LaunchAtLoginManager.shared
     @AppStorage("appLanguage") private var appLanguage: String = "zh-Hans"
+    @StateObject private var updateChecker = UpdateChecker()
     @State private var showingResetAlert = false
     
     var body: some View {
@@ -689,6 +702,14 @@ struct OtherSettingsView: View {
                 }
                 Section(header: LocalizedText("about").font(.headline).foregroundColor(.primary).padding(.top, 16)) {
                     HStack { LocalizedText("version").foregroundColor(.secondary); Spacer(); Text(AppEnvironment.appVersion).foregroundColor(.secondary) }
+                    if updateChecker.updateAvailable, let latest = updateChecker.latestVersion {
+                        HStack {
+                            Text(env.localized("updateAvailable").replacingOccurrences(of: "{version}", with: latest))
+                                .foregroundColor(.orange)
+                                .fontWeight(.medium)
+                            Spacer()
+                        }
+                    }
                     HStack { LocalizedText("developerKey").foregroundColor(.secondary); Spacer(); Text("南洋Nayan").foregroundColor(.secondary) }
                 }
             }

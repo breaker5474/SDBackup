@@ -88,6 +88,7 @@ class BackupManager: ObservableObject {
         loadTrustedDevices()
         loadHistory()
         checkExistingVolumes()
+        checkStaleStateFile()
         startListening()
     }
     
@@ -583,11 +584,27 @@ class BackupManager: ObservableObject {
 
         DispatchQueue.global(qos: .userInitiated).async {
             var totalFilesToTransfer: Int = 0
+            var totalBytesToTransfer: Int64 = 0
+            
+            // --- Feature 5: Check for existing lock file ---
+            let lockPath = (destination as NSString).appendingPathComponent(".sdbackup_lock")
+            if let lockData = FileManager.default.contents(atPath: lockPath),
+               let lockJSON = try? JSONSerialization.jsonObject(with: lockData) as? [String: Any],
+               let pid = lockJSON["pid"] as? Int32 {
+                if self.isProcessAlive(pid) {
+                    DispatchQueue.main.async {
+                        self.isWorking = false
+                        self.sendNotification(titleKey: "appName", body: "⚠️ \(sourceName) 备份已在另一进程中运行 (PID: \(pid))", isSuccess: false)
+                    }
+                    return
+                }
+                // Stale lock, will be overwritten
+            }
             
             // --- Dry Run ---
             let dryRunProcess = Process()
             dryRunProcess.executableURL = URL(fileURLWithPath: "/usr/bin/rsync")
-            var dryArgs = ["-an", "--whole-file", "--out-format=%i"] // -n for dry run, -W for whole-file performance
+            var dryArgs = ["-an", "--whole-file", "--out-format=%i %l"] // -n for dry run, -W for whole-file performance; %l = file length
             
             if enableVerif && verifLevel != .basic { dryArgs.append("--checksum") }
             if strategy == .skipIfExists { dryArgs.append("--ignore-existing") } else { dryArgs.append("-u") }
@@ -608,10 +625,16 @@ class BackupManager: ObservableObject {
                 if let str = String(data: data, encoding: .utf8) {
                     let lines = str.components(separatedBy: .newlines)
                     for line in lines where !line.isEmpty {
-                        // %i flags: > (sent), < (received), c (checksum/attribute change), f (file)
-                        // It must contain 'f' and one of the transfer symbols.
-                        if (line.contains(">f") || line.contains("<f") || line.contains("cf")) && !line.contains(".f") {
-                            totalFilesToTransfer += 1
+                        // Format: "%i %l" — flags then file size
+                        let dryParts = line.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
+                        if dryParts.count >= 1 {
+                            let flags = String(dryParts[0])
+                            if (flags.contains(">f") || flags.contains("<f") || flags.contains("cf")) && !flags.contains(".f") {
+                                totalFilesToTransfer += 1
+                                if dryParts.count >= 2, let fileSize = Int64(dryParts[1]) {
+                                    totalBytesToTransfer += fileSize
+                                }
+                            }
                         }
                     }
                 }
@@ -619,6 +642,10 @@ class BackupManager: ObservableObject {
                 
                 let dryExitCode = dryRunProcess.terminationStatus
                 if dryExitCode != 0 {
+                    // On error, track card health
+                    if !isMigrating, let volURL = sourceVolumeURL {
+                        self.trackCardError(volURL: volURL, exitCode: dryExitCode)
+                    }
                     DispatchQueue.main.async {
                         self.isWorking = false
                         self.sendNotification(titleKey: "appName", body: "⚠️ \(sourceName) 备份预检失败 (Exit: \(dryExitCode))，请检查存储卡连接。", isSuccess: false)
@@ -637,11 +664,55 @@ class BackupManager: ObservableObject {
             }
             
             if totalFilesToTransfer == 0 {
+                // Reset card error count on successful dry run (no errors detected)
+                if !isMigrating, let volURL = sourceVolumeURL {
+                    self.resetCardErrorCount(volURL: volURL)
+                }
                 DispatchQueue.main.async {
                     self.isWorking = false
                     self.addLog(BackupLog(date: Date(), sourceName: sourceName, destinationPath: destination, dataTransferredStr: "0 MB", fileCount: 0, durationSeconds: 0, result: "无新文件"))
                 }
                 return
+            }
+            
+            // --- Show estimate before real run ---
+            let estimateMB = Double(totalBytesToTransfer) / 1_000_000
+            let estimateDataStr: String
+            if estimateMB > 1000 {
+                estimateDataStr = String(format: "%.2f GB", estimateMB / 1000)
+            } else {
+                estimateDataStr = String(format: "%.0f MB", estimateMB)
+            }
+            // Rough estimate: ~50 MB/s for SD card
+            let estimatedSeconds = max(1, Int(estimateMB / 50))
+            let lang = UserDefaults.standard.string(forKey: "appLanguage") ?? "zh-Hans"
+            let estimateMsg = L10n.translate("backupEstimate", lang: lang)
+                .replacingOccurrences(of: "{files}", with: "\(totalFilesToTransfer)")
+                .replacingOccurrences(of: "{size}", with: estimateDataStr)
+                .replacingOccurrences(of: "{seconds}", with: "\(estimatedSeconds)")
+            DispatchQueue.main.async {
+                self.progressDetailText = estimateMsg
+            }
+            
+            // --- Feature 5: Write lock file ---
+            let lockData: [String: Any] = [
+                "source": sourceName,
+                "started": ISO8601DateFormatter().string(from: Date()),
+                "pid": ProcessInfo.processInfo.processIdentifier
+            ]
+            if let jsonData = try? JSONSerialization.data(withJSONObject: lockData) {
+                FileManager.default.createFile(atPath: lockPath, contents: jsonData)
+            }
+            
+            // --- Feature 6: Write initial state file ---
+            let statePath = (destination as NSString).appendingPathComponent(".sdbackup_state.json")
+            let stateData: [String: Any] = [
+                "source": sourceName,
+                "totalFiles": totalFilesToTransfer,
+                "started": ISO8601DateFormatter().string(from: Date())
+            ]
+            if let jsonStateData = try? JSONSerialization.data(withJSONObject: stateData) {
+                FileManager.default.createFile(atPath: statePath, contents: jsonStateData)
             }
             
             // --- Real Run ---
@@ -674,6 +745,8 @@ class BackupManager: ObservableObject {
             var transferredBytes: Int64 = 0
             var copiedFilesCount: Int = 0
             var errorOutput = ""
+            // Feature 1: Track file categories
+            var fileCategoryCounts: [String: Int] = ["photo": 0, "video": 0, "metadata": 0, "other": 0]
             
             if preventSleep { self.sleepPreventer.startPreventingSleep(reason: "SD Backup: \(sourceName)") }
             
@@ -694,6 +767,19 @@ class BackupManager: ObservableObject {
                             if let size = Int64(parts[2]) {
                                 transferredBytes += size
                                 copiedFilesCount += 1
+                                // Feature 1: Categorize file by extension
+                                let filename = String(parts[1])
+                                let ext = (filename as NSString).pathExtension.lowercased()
+                                switch ext {
+                                case "jpg", "jpeg", "heif", "heic", "arw", "cr2", "cr3", "nef", "orf", "raf", "dng":
+                                    fileCategoryCounts["photo", default: 0] += 1
+                                case "mov", "mp4", "m4v", "avi", "mts":
+                                    fileCategoryCounts["video", default: 0] += 1
+                                case "xml", "xmp":
+                                    fileCategoryCounts["metadata", default: 0] += 1
+                                default:
+                                    fileCategoryCounts["other", default: 0] += 1
+                                }
                                 let elapsed = Date().timeIntervalSince(startTime)
                                 let percent = min(Double(copiedFilesCount) / Double(totalFilesToTransfer), 1.0)
                                 let speed = elapsed > 0 ? Double(transferredBytes) / elapsed : 0
@@ -701,6 +787,19 @@ class BackupManager: ObservableObject {
                                 DispatchQueue.main.async {
                                     self.progressPercent = percent
                                     self.progressDetailText = String(format: "已传 %d/%d (%.1f MB/s)  %d%%", copiedFilesCount, totalFilesToTransfer, speed / 1_000_000, Int(percent * 100))
+                                }
+                                
+                                // Feature 6: Update state file every 10 files
+                                if copiedFilesCount % 10 == 0 {
+                                    let updateData: [String: Any] = [
+                                        "completedFiles": copiedFilesCount,
+                                        "completedBytes": transferredBytes,
+                                        "lastFile": String(parts[1]),
+                                        "updated": ISO8601DateFormatter().string(from: Date())
+                                    ]
+                                    if let jsonData = try? JSONSerialization.data(withJSONObject: updateData) {
+                                        FileManager.default.createFile(atPath: statePath, contents: jsonData)
+                                    }
                                 }
                             }
                         }
@@ -723,10 +822,35 @@ class BackupManager: ObservableObject {
                         DispatchQueue.main.async { NSWorkspace.shared.open(URL(fileURLWithPath: destination)) }
                     }
                     if ejectOnFinish && !isMigrating, let url = sourceVolumeURL { self.ejectCard(url: url) }
+                    // Feature 3: Reset card error count on success
+                    if !isMigrating, let volURL = sourceVolumeURL {
+                        self.resetCardErrorCount(volURL: volURL)
+                    }
                     
                     let transferredMB = Double(transferredBytes) / 1_000_000
                     let dataStr = transferredMB > 1000 ? String(format: "%.2f GB", transferredMB / 1000) : String(format: "%.1f MB", transferredMB)
-                    let statMsg = "已检查 \(totalFilesToTransfer) 个文件，新增备份 \(copiedFilesCount) 个文件 (\(dataStr))"
+                    // Feature 1: Build category breakdown string
+                    let lang = UserDefaults.standard.string(forKey: "appLanguage") ?? "zh-Hans"
+                    let catPhoto = L10n.translate("catPhoto", lang: lang)
+                    let catVideo = L10n.translate("catVideo", lang: lang)
+                    let catMetadata = L10n.translate("catMetadata", lang: lang)
+                    let catOther = L10n.translate("catOther", lang: lang)
+                    let photoCount = fileCategoryCounts["photo"] ?? 0
+                    let videoCount = fileCategoryCounts["video"] ?? 0
+                    let metadataCount = fileCategoryCounts["metadata"] ?? 0
+                    let otherCount = fileCategoryCounts["other"] ?? 0
+                    var catParts: [String] = []
+                    if photoCount > 0 { catParts.append("\(catPhoto) \(photoCount)") }
+                    if videoCount > 0 { catParts.append("\(catVideo) \(videoCount)") }
+                    if metadataCount > 0 { catParts.append("\(catMetadata) \(metadataCount)") }
+                    if otherCount > 0 { catParts.append("\(catOther) \(otherCount)") }
+                    let catStr = catParts.joined(separator: ", ")
+                    let statMsg: String
+                    if catParts.isEmpty {
+                        statMsg = String(format: "已检查 %d 个文件，新增备份 %d 个 (%@)", totalFilesToTransfer, copiedFilesCount, dataStr)
+                    } else {
+                        statMsg = String(format: "已检查 %d 个文件，新增备份 %d 个 (%@) — %@", totalFilesToTransfer, copiedFilesCount, catStr, dataStr)
+                    }
                     
                     self.sendNotification(titleKey: "appName", body: "\(sourceName) 备份完成: \(statMsg)", isSuccess: true)
                     self.addLog(BackupLog(date: Date(), sourceName: sourceName, destinationPath: destination, dataTransferredStr: dataStr, fileCount: copiedFilesCount, durationSeconds: duration, result: "成功 (\(statMsg))"))
@@ -736,6 +860,11 @@ class BackupManager: ObservableObject {
                     else if exitStatus == 10 || exitStatus == 11 || exitStatus == 23 { errorReason = "物理连接断开" }
                     else if exitStatus == 20 { errorReason = "用户手动取消" }
                     else if exitStatus == 21 { errorReason = "校验异常 (Checksum Error)" }
+                    
+                    // Feature 3: Track card errors
+                    if !isMigrating, let volURL = sourceVolumeURL {
+                        self.trackCardError(volURL: volURL, exitCode: exitStatus)
+                    }
                     
                     if !errorOutput.isEmpty { print("Rsync Error: \(errorOutput)") }
                     if exitStatus != 20 { 
@@ -747,6 +876,10 @@ class BackupManager: ObservableObject {
                 print("Failed to run rsync: \(error)")
                 self.addLog(BackupLog(date: Date(), sourceName: sourceName, destinationPath: destination, dataTransferredStr: "0 MB", fileCount: 0, durationSeconds: 0, result: "系统错误"))
             }
+            
+            // Feature 5 & 6: Clean up lock and state files
+            self.deleteLockFile(at: destination)
+            self.deleteStateFile(at: destination)
             
             self.sleepPreventer.stopPreventingSleep()
             DispatchQueue.main.async {
@@ -763,6 +896,61 @@ class BackupManager: ObservableObject {
         }
     }
     
+    // MARK: - Feature 3: Card Health Tracking
+    
+    private let cardErrorCountsKey = "cardErrorCounts"
+    private let cardErrorThreshold = 3
+    
+    /// Track rsync error for a specific card. Only tracks IO/connection errors (exit codes 10, 11, 23).
+    private func trackCardError(volURL: URL, exitCode: Int32) {
+        // Only track IO/connection errors
+        guard exitCode == 10 || exitCode == 11 || exitCode == 23 else { return }
+        
+        let deviceID = volURL.lastPathComponent
+        var counts = UserDefaults.standard.dictionary(forKey: cardErrorCountsKey) as? [String: Int] ?? [:]
+        let newCount = (counts[deviceID] ?? 0) + 1
+        counts[deviceID] = newCount
+        UserDefaults.standard.set(counts, forKey: cardErrorCountsKey)
+        
+        if newCount >= cardErrorThreshold {
+            let lang = UserDefaults.standard.string(forKey: "appLanguage") ?? "zh-Hans"
+            let cardName = self.connectedCards.first(where: { $0.url == volURL })?.displayName ?? deviceID
+            let warningMsg = L10n.translate("cardHealthWarning", lang: lang)
+                .replacingOccurrences(of: "{name}", with: cardName)
+                .replacingOccurrences(of: "{count}", with: "\(newCount)")
+            self.sendNotification(titleKey: "appName", body: warningMsg, isSuccess: false)
+        }
+    }
+    
+    /// Reset card error count on successful backup.
+    private func resetCardErrorCount(volURL: URL) {
+        let deviceID = volURL.lastPathComponent
+        var counts = UserDefaults.standard.dictionary(forKey: cardErrorCountsKey) as? [String: Int] ?? [:]
+        if counts[deviceID] != nil && counts[deviceID]! > 0 {
+            counts[deviceID] = 0
+            UserDefaults.standard.set(counts, forKey: cardErrorCountsKey)
+        }
+    }
+    
+    // MARK: - Feature 4: Log Export
+    
+    /// Export backup history as a formatted CSV string.
+    func exportLogs() -> String {
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        
+        var csv = "Time,Source,Destination,Files,Size,Duration(s),Status\n"
+        for log in backupHistory {
+            let time = dateFormatter.string(from: log.date)
+            let source = log.sourceName.replacingOccurrences(of: ",", with: ";")
+            let dest = (log.destinationPath ?? "-").replacingOccurrences(of: ",", with: ";")
+            let size = log.dataTransferredStr.replacingOccurrences(of: ",", with: ";")
+            let status = log.result.replacingOccurrences(of: ",", with: ";")
+            csv += "\(time),\(source),\(dest),\(log.fileCount),\(size),\(Int(log.durationSeconds)),\(status)\n"
+        }
+        return csv
+    }
+    
     private func cleanEmptyDirectories(at path: String) {
         let fileManager = FileManager.default
         let url = URL(fileURLWithPath: path)
@@ -776,6 +964,41 @@ class BackupManager: ObservableObject {
             if let contents = try? fileManager.contentsOfDirectory(atPath: dir.path) {
                 let unhidden = contents.filter { $0 != ".DS_Store" }
                 if unhidden.isEmpty { try? fileManager.removeItem(at: dir) }
+            }
+        }
+    }
+    
+    // MARK: - Feature 5: Backup Lock File
+    
+    private func isProcessAlive(_ pid: Int32) -> Bool {
+        return kill(pid, 0) == 0
+    }
+    
+    private func deleteLockFile(at destination: String) {
+        let lockPath = (destination as NSString).appendingPathComponent(".sdbackup_lock")
+        try? FileManager.default.removeItem(atPath: lockPath)
+    }
+    
+    // MARK: - Feature 6: Resume State File
+    
+    private func deleteStateFile(at destination: String) {
+        let statePath = (destination as NSString).appendingPathComponent(".sdbackup_state.json")
+        try? FileManager.default.removeItem(atPath: statePath)
+    }
+    
+    private func checkStaleStateFile() {
+        let targetPath = UserDefaults.standard.string(forKey: "targetBackupPath") ?? ""
+        let fallbackPath = getFallbackPath()
+        
+        let pathsToCheck = [targetPath, fallbackPath].filter { !$0.isEmpty }
+        
+        for path in pathsToCheck {
+            let statePath = (path as NSString).appendingPathComponent(".sdbackup_state.json")
+            if FileManager.default.fileExists(atPath: statePath) {
+                let lang = UserDefaults.standard.string(forKey: "appLanguage") ?? "zh-Hans"
+                let msg = L10n.translate("incompleteBackupDetected", lang: lang)
+                sendNotification(titleKey: "appName", body: msg, isSuccess: false)
+                break
             }
         }
     }

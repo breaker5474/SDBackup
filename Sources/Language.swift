@@ -153,7 +153,17 @@ struct L10n {
             "resetWarning": "⚠️ 确定要重设吗？所有授权设备、路径设置、文件过滤以及历史记录都将被清除且无法恢复。",
             "resetBtn": "恢复默认设置",
             "resetConfirm": "此操作不可撤销，确定继续？",
-            "resetSuccess": "重置成功，请手动重新启动软件。"
+            "resetSuccess": "重置成功，请手动重新启动软件。",
+            
+            "catPhoto": "照片",
+            "catVideo": "视频",
+            "catMetadata": "配置文件",
+            "catOther": "其他",
+            "backupEstimate": "即将备份 {files} 个文件 (约 {size})，预计 {seconds} 秒",
+            "cardHealthWarning": "⚠️ 存储卡 {name} 已连续出现 {count} 次传输异常，建议更换该卡",
+            "exportLogs": "导出日志",
+            "incompleteBackupDetected": "检测到未完成的备份任务，建议重新插入存储卡继续备份",
+            "updateAvailable": "发现新版本: {version}"
         ],
         "en": [
             "appName": "SD Backup Pro",
@@ -275,7 +285,17 @@ struct L10n {
             "resetWarning": "⚠️ Are you sure? All trust history, paths, and logs will be permanently deleted.",
             "resetBtn": "Restore Default Settings",
             "resetConfirm": "This cannot be undone. Continue?",
-            "resetSuccess": "Reset complete. Please restart the app."
+            "resetSuccess": "Reset complete. Please restart the app.",
+            
+            "catPhoto": "Photos",
+            "catVideo": "Videos",
+            "catMetadata": "Metadata",
+            "catOther": "Other",
+            "backupEstimate": "Backing up {files} files (~{size}), est. {seconds}s",
+            "cardHealthWarning": "⚠️ Card {name} has had {count} consecutive transfer errors. Consider replacing it.",
+            "exportLogs": "Export Logs",
+            "incompleteBackupDetected": "Incomplete backup detected. Re-insert the SD card to resume.",
+            "updateAvailable": "Update available: {version}"
         ]
     ]
 }
