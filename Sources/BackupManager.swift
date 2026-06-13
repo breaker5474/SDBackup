@@ -6,12 +6,19 @@ import UserNotifications
 struct ConnectedCard: Identifiable, Equatable {
     var id: URL { url }
     let url: URL
-    let name: String
+    let name: String          // 原始卷名
+    var customName: String?   // 用户自定义名
     let format: String
     let totalSpace: Int64
     let freeSpace: Int64
     var isTrusted: Bool
-    var selectedSourcePaths: [String] = [] // NEW: support multiple sources
+    var selectedSourcePaths: [String] = []
+    
+    var displayName: String { customName ?? name }
+    
+    static func == (lhs: ConnectedCard, rhs: ConnectedCard) -> Bool {
+        lhs.url == rhs.url && lhs.customName == rhs.customName && lhs.isTrusted == rhs.isTrusted && lhs.selectedSourcePaths == rhs.selectedSourcePaths
+    }
 }
 
 struct BackupLog: Identifiable, Codable {
@@ -50,6 +57,7 @@ class BackupManager: ObservableObject {
     private var currentSourceVolumeURL: URL?
     private let sourcePathsKey = "deviceSourcePaths"
     private let ignoredDevicesKey = "ignoredDeviceIDs"
+    private let customNamesKey = "customCardNames"
     private var ignoredDeviceIDs: Set<String> = []
     
     // 多卡排队备份
@@ -164,6 +172,25 @@ class BackupManager: ObservableObject {
         UserDefaults.standard.set(dict, forKey: sourcePathsKey)
     }
     
+    func renameCard(url: URL, newName: String) {
+        let deviceID = url.lastPathComponent
+        var dict = UserDefaults.standard.dictionary(forKey: customNamesKey) as? [String: String] ?? [:]
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            dict.removeValue(forKey: deviceID)
+        } else {
+            dict[deviceID] = trimmed
+        }
+        UserDefaults.standard.set(dict, forKey: customNamesKey)
+        
+        DispatchQueue.main.async {
+            if let idx = self.connectedCards.firstIndex(where: { $0.url == url }) {
+                self.connectedCards[idx].customName = trimmed.isEmpty ? nil : trimmed
+                self.dummyTrigger.toggle()
+            }
+        }
+    }
+    
     func resetAllSettings() {
         let identifier = Bundle.main.bundleIdentifier ?? "SDBackupApp"
         UserDefaults.standard.removePersistentDomain(forName: identifier)
@@ -275,7 +302,13 @@ class BackupManager: ObservableObject {
             savedSources = paths
         }
         
-        let card = ConnectedCard(url: url, name: name, format: format, totalSpace: total, freeSpace: free, isTrusted: isTrusted, selectedSourcePaths: savedSources)
+        // 加载自定义名称
+        var customName: String? = nil
+        if let dict = UserDefaults.standard.dictionary(forKey: customNamesKey) as? [String: String], let saved = dict[deviceID] {
+            customName = saved
+        }
+        
+        let card = ConnectedCard(url: url, name: name, customName: customName, format: format, totalSpace: total, freeSpace: free, isTrusted: isTrusted, selectedSourcePaths: savedSources)
         DispatchQueue.main.async {
             if !self.connectedCards.contains(where: { $0.url == url }) {
                 self.connectedCards.append(card)

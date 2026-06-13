@@ -3,6 +3,7 @@ import SwiftUI
 
 class AppEnvironment: ObservableObject {
     @AppStorage("appLanguage") var languageCode: String = "zh-Hans"
+    static let appVersion = "1.0.0"
     
     func localized(_ key: String) -> String {
         return L10n.translate(key, lang: languageCode)
@@ -42,6 +43,7 @@ struct L10n {
             "noCards": "未检测到外部存储设备。",
             "settingsAction": "设置...",
             "settingsTitle": "设置",
+            "cancel": "取消",
             "quit": "退出",
             "eject": "推出",
             "lastBackup": "上次备份：",
@@ -68,6 +70,9 @@ struct L10n {
             "autoBackupMount": "插入存储卡时自动开始备份",
             "manualBackupAll": "立即备份所有已挂载设备",
             "backupCardNow": "立即备份此卡",
+            "renameCard": "重命名",
+            "renameCardTitle": "重命名存储卡",
+            "renameCardPlaceholder": "输入新名称",
             
             "targetLocation": "目标位置",
             "targetMain": "主备份路径 (移动硬盘)",
@@ -160,6 +165,7 @@ struct L10n {
             "noCards": "No external drives detected.",
             "settingsAction": "Settings...",
             "settingsTitle": "Settings",
+            "cancel": "Cancel",
             "quit": "Quit",
             "eject": "Eject",
             "lastBackup": "Last Backup: ",
@@ -186,6 +192,9 @@ struct L10n {
             "autoBackupMount": "Auto Backup when SD Card Mounts",
             "manualBackupAll": "Backup All Mounted Devices Now",
             "backupCardNow": "Backup This Card Now",
+            "renameCard": "Rename",
+            "renameCardTitle": "Rename Card",
+            "renameCardPlaceholder": "Enter new name",
             
             "targetLocation": "Destinations",
             "targetMain": "Primary Target Path (External Drive)",

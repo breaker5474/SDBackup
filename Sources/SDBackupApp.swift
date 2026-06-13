@@ -60,10 +60,18 @@ struct SDBackupApp: App {
                 ForEach(backupManager.connectedCards) { card in
                     let freeGB = Double(card.freeSpace) / 1_000_000_000
                     let totalGB = Double(card.totalSpace) / 1_000_000_000
+                    let cardLastLog = backupManager.backupHistory.first(where: { $0.sourceName == card.url.lastPathComponent })
                     
-                    Menu("• \(card.name)") {
+                    Menu("• \(card.displayName)") {
                         Text("\(card.format) | \(L10n.translate("freeCap", lang: env.languageCode)): \(String(format: "%.1f", freeGB))GB / \(String(format: "%.1f", totalGB))GB")
                             .disabled(true)
+                        
+                        if let log = cardLastLog {
+                            Text("\(L10n.translate("lastBackup", lang: env.languageCode)) \(log.date, style: .date) \(log.date, style: .time)")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                                .disabled(true)
+                        }
                         
                         Divider()
                         
@@ -80,7 +88,7 @@ struct SDBackupApp: App {
                         
                         Divider()
                         
-                        Button("\(L10n.translate("eject", lang: env.languageCode)) \(card.name)") {
+                        Button("\(L10n.translate("eject", lang: env.languageCode)) \(card.displayName)") {
                             backupManager.ejectCard(url: card.url)
                         }
                     }
@@ -199,10 +207,16 @@ struct BackupSettingsView: View {
     @AppStorage("enableFallbackPath") private var enableFallbackPath: Bool = false
     @AppStorage("localBackupPath") private var localBackupPath: String = ""
     @AppStorage("autoBackupOnMount") private var autoBackupOnMount: Bool = true
+    @AppStorage("enableFileFilter") private var enableFileFilter: Bool = false
+    @AppStorage("fileFilterMode") private var fileFilterMode: FileFilterMode = .include
+    @AppStorage("allowedFileExtensions") private var allowedFileExtensions: String = "arw, cr2, cr3, jpg, heif, mov, mp4, xml"
     
     @ObservedObject var backupManager: BackupManager
     @State private var timer = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
     @State private var refreshToggle = false
+    @State private var showingRenameAlert = false
+    @State private var renameTarget: ConnectedCard? = nil
+    @State private var renameText: String = ""
     
     var body: some View {
         VStack(spacing: 20) {
@@ -260,7 +274,10 @@ struct BackupSettingsView: View {
                                 Image(systemName: "sdcard.fill").foregroundColor(.blue).font(.system(size: 30))
                                 VStack(alignment: .leading, spacing: 4) {
                                     HStack {
-                                        Text(card.name).fontWeight(.medium)
+                                        Text(card.displayName).fontWeight(.medium)
+                                        if card.customName != nil {
+                                            Text(card.name).font(.caption2).foregroundColor(.secondary)
+                                        }
                                         Text(card.format).font(.caption).padding(.horizontal, 4).padding(.vertical, 2).background(Color.secondary.opacity(0.2)).cornerRadius(4)
                                         Spacer()
                                         Text("\(env.localized("freeCap")): \(String(format: "%.1f", freeGB))GB / \(String(format: "%.1f", totalGB))GB (\(Int(usedPerc * 100))%)")
@@ -354,10 +371,20 @@ struct BackupSettingsView: View {
                                     }
                                 }
                                 
-                                Button(action: { backupManager.ejectCard(url: card.url) }) {
-                                    LocalizedText("eject")
+                                HStack(spacing: 8) {
+                                    Button(action: { backupManager.ejectCard(url: card.url) }) {
+                                        LocalizedText("eject")
+                                    }
+                                    .disabled(backupManager.isWorking)
+                                    
+                                    Button(action: {
+                                        renameTarget = card
+                                        renameText = card.customName ?? card.name
+                                        showingRenameAlert = true
+                                    }) {
+                                        LocalizedText("renameCard")
+                                    }
                                 }
-                                .disabled(backupManager.isWorking)
                             }
                             .padding(.vertical, 4)
                         }
@@ -366,8 +393,47 @@ struct BackupSettingsView: View {
                 .padding(12)
                 .frame(maxWidth: .infinity, alignment: .leading)
             } label: { LocalizedText("cardDetails").font(.headline) }
+            
+            GroupBox {
+                VStack(alignment: .leading, spacing: 12) {
+                    Toggle(isOn: $enableFileFilter.animation(.spring())) {
+                        LocalizedText("enableFileFilter")
+                    }
+                    
+                    if enableFileFilter {
+                        Picker(env.localized("fileFilterMode"), selection: $fileFilterMode) {
+                            LocalizedText("filterInclude").tag(FileFilterMode.include)
+                            LocalizedText("filterExclude").tag(FileFilterMode.exclude)
+                        }
+                        .pickerStyle(.segmented)
+                        .padding(.vertical, 4)
+                        
+                        VStack(alignment: .leading, spacing: 4) {
+                            TextField(env.localized("filterHint"), text: $allowedFileExtensions)
+                                .textFieldStyle(.roundedBorder)
+                            LocalizedText("filterHint").font(.caption2).foregroundColor(.secondary)
+                        }
+                        .padding(.bottom, 4)
+                    }
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            } label: { LocalizedText("fileFilters").font(.headline) }
         }
         .onReceive(timer) { _ in refreshToggle.toggle() }
+        .alert(env.localized("renameCardTitle"), isPresented: $showingRenameAlert) {
+            TextField(env.localized("renameCardPlaceholder"), text: $renameText)
+            Button("OK") {
+                if let target = renameTarget {
+                    backupManager.renameCard(url: target.url, newName: renameText)
+                }
+            }
+            Button(L10n.translate("cancel", lang: env.languageCode)) {}
+        } message: {
+            if let target = renameTarget {
+                Text("\(target.name)")
+            }
+        }
     }
 }
 
@@ -472,9 +538,6 @@ struct AdvancedSettingsView: View {
     @AppStorage("comparisonStrategy") private var comparisonStrategy: BackupComparisonStrategy = .updateIfModified
     @AppStorage("enableVerification") private var enableVerification: Bool = false
     @AppStorage("verificationLevel") private var verificationLevel: PostTransferVerificationLevel = .basic
-    @AppStorage("enableFileFilter") private var enableFileFilter: Bool = false
-    @AppStorage("fileFilterMode") private var fileFilterMode: FileFilterMode = .include
-    @AppStorage("allowedFileExtensions") private var allowedFileExtensions: String = "arw, cr2, cr3, jpg, heif, mov, mp4, xml"
     @AppStorage("ejectOnFinish") private var ejectOnFinish: Bool = false
     @AppStorage("openFinderOnFinish") private var openFinderOnFinish: Bool = true
     @AppStorage("autoMigrateFallback") private var autoMigrateFallback: Bool = true
@@ -511,28 +574,6 @@ struct AdvancedSettingsView: View {
                     }
                 }
                 .padding(.bottom, 8)
-                    
-                Section(header: LocalizedText("fileFilters").font(.headline).foregroundColor(.primary)) {
-                    Toggle(isOn: $enableFileFilter.animation(.spring())) {
-                        LocalizedText("enableFileFilter")
-                    }
-                    
-                    if enableFileFilter {
-                        Picker(env.localized("fileFilterMode"), selection: $fileFilterMode) {
-                            LocalizedText("filterInclude").tag(FileFilterMode.include)
-                            LocalizedText("filterExclude").tag(FileFilterMode.exclude)
-                        }
-                        .pickerStyle(.segmented)
-                        .padding(.vertical, 4)
-                        
-                        VStack(alignment: .leading, spacing: 4) {
-                            TextField(env.localized("filterHint"), text: $allowedFileExtensions)
-                                .textFieldStyle(.roundedBorder)
-                            LocalizedText("filterHint").font(.caption2).foregroundColor(.secondary)
-                        }
-                        .padding(.bottom, 4)
-                    }
-                }
                 
                 Section(header: LocalizedText("advancedPost").font(.headline).foregroundColor(.primary)) {
                     Toggle(isOn: $preventSleep) { LocalizedText("preventSleep") }
@@ -647,7 +688,7 @@ struct OtherSettingsView: View {
                     }
                 }
                 Section(header: LocalizedText("about").font(.headline).foregroundColor(.primary).padding(.top, 16)) {
-                    HStack { LocalizedText("version").foregroundColor(.secondary); Spacer(); Text(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "-").foregroundColor(.secondary) }
+                    HStack { LocalizedText("version").foregroundColor(.secondary); Spacer(); Text(AppEnvironment.appVersion).foregroundColor(.secondary) }
                     HStack { LocalizedText("developerKey").foregroundColor(.secondary); Spacer(); Text("南洋Nayan").foregroundColor(.secondary) }
                 }
             }
