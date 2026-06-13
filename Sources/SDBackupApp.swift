@@ -67,6 +67,19 @@ struct SDBackupApp: App {
                         
                         Divider()
                         
+                        Button(L10n.translate("backupCardNow", lang: env.languageCode)) {
+                            let urls: [URL]
+                            if card.selectedSourcePaths.isEmpty {
+                                urls = [card.url.appendingPathComponent("DCIM")]
+                            } else {
+                                urls = card.selectedSourcePaths.map { URL(fileURLWithPath: $0) }
+                            }
+                            backupManager.startBackupProcess(volumeURL: card.url, sourceURLs: urls)
+                        }
+                        .disabled(backupManager.isWorking)
+                        
+                        Divider()
+                        
                         Button("\(L10n.translate("eject", lang: env.languageCode)) \(card.name)") {
                             backupManager.ejectCard(url: card.url)
                         }
@@ -85,7 +98,7 @@ struct SDBackupApp: App {
             }
         }
         
-        Window("首选项", id: "settings") {
+        Window(L10n.translate("settingsTitle", lang: env.languageCode), id: "settings") {
             SettingsView(backupManager: backupManager)
                 .environmentObject(env) // 注入响应式双语环境
         }
@@ -198,13 +211,11 @@ struct BackupSettingsView: View {
                     Toggle(isOn: $autoBackupOnMount) { LocalizedText("autoBackupMount") }
                         .toggleStyle(.switch)
                     
-                    if !autoBackupOnMount {
-                        Button(action: { backupManager.manualBackupAll() }) {
-                            LocalizedText("manualBackupAll")
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(backupManager.connectedCards.isEmpty || backupManager.isWorking)
+                    Button(action: { backupManager.manualBackupAll() }) {
+                        LocalizedText("manualBackupAll")
                     }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(backupManager.connectedCards.isEmpty || backupManager.isWorking)
                 }
                 .padding(12)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -565,7 +576,7 @@ struct LogsView: View {
                         Text("\(Int(log.durationSeconds)) \(env.localized("sec"))").font(.caption)
                     }
                     TableColumn(env.localized("statusCol")) { log in
-                        let statusColor: Color = log.result == "成功" ? .green : (log.result == "无新文件" ? .secondary : .red)
+                        let statusColor: Color = log.result.hasPrefix("成功") ? .green : (log.result.contains("无新文件") ? .secondary : .red)
                         Text(log.result).font(.caption).foregroundColor(statusColor)
                     }
                 }
@@ -575,7 +586,9 @@ struct LogsView: View {
                     if let id = ids.first,
                        let log = backupManager.backupHistory.first(where: { $0.id == id }),
                        let dest = log.destinationPath {
-                        NSWorkspace.shared.open(URL(fileURLWithPath: dest))
+                        if FileManager.default.fileExists(atPath: dest) {
+                            NSWorkspace.shared.open(URL(fileURLWithPath: dest))
+                        }
                     }
                 }
             }
@@ -629,12 +642,12 @@ struct OtherSettingsView: View {
                             HStack { Image(systemName: "trash"); Text(env.localized("resetBtn")) }
                         }
                         .alert(isPresented: $showingResetAlert) {
-                            Alert(title: Text(env.localized("resetTitle")), message: Text(env.localized("resetWarning")), primaryButton: .destructive(Text(env.localized("resetBtn"))) { backupManager.resetAllSettings() }, secondaryButton: .cancel())
+                            Alert(title: Text(env.localized("resetTitle")), message: Text(env.localized("resetConfirm")), primaryButton: .destructive(Text(env.localized("resetBtn"))) { backupManager.resetAllSettings() }, secondaryButton: .cancel())
                         }
                     }
                 }
                 Section(header: LocalizedText("about").font(.headline).foregroundColor(.primary).padding(.top, 16)) {
-                    HStack { LocalizedText("version").foregroundColor(.secondary); Spacer(); Text("0.8.0").foregroundColor(.secondary) }
+                    HStack { LocalizedText("version").foregroundColor(.secondary); Spacer(); Text(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "-").foregroundColor(.secondary) }
                     HStack { LocalizedText("developerKey").foregroundColor(.secondary); Spacer(); Text("南洋Nayan").foregroundColor(.secondary) }
                 }
             }

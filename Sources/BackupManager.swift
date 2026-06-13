@@ -52,6 +52,13 @@ class BackupManager: ObservableObject {
     private let ignoredDevicesKey = "ignoredDeviceIDs"
     private var ignoredDeviceIDs: Set<String> = []
     
+    // 多卡排队备份
+    private struct PendingBackup {
+        let volumeURL: URL
+        let sourceURLs: [URL]
+    }
+    private var backupQueue: [PendingBackup] = []
+    
     @Published var currentActionTextKey = "ready"
     
     @Published var progressPercent: Double = 0.0
@@ -191,12 +198,17 @@ class BackupManager: ObservableObject {
     }
     
     func manualBackupAll() {
+        backupQueue.removeAll()
         for card in connectedCards {
+            let urls: [URL]
             if card.selectedSourcePaths.isEmpty {
-                let dcimURL = card.url.appendingPathComponent("DCIM")
-                startBackupProcess(volumeURL: card.url, sourceURLs: [dcimURL])
+                urls = [card.url.appendingPathComponent("DCIM")]
             } else {
-                let urls = card.selectedSourcePaths.map { URL(fileURLWithPath: $0) }
+                urls = card.selectedSourcePaths.map { URL(fileURLWithPath: $0) }
+            }
+            if isWorking {
+                backupQueue.append(PendingBackup(volumeURL: card.url, sourceURLs: urls))
+            } else {
                 startBackupProcess(volumeURL: card.url, sourceURLs: urls)
             }
         }
@@ -268,6 +280,32 @@ class BackupManager: ObservableObject {
             if !self.connectedCards.contains(where: { $0.url == url }) {
                 self.connectedCards.append(card)
                 self.dummyTrigger.toggle()
+                
+                // 卡片添加完成后，检查是否需要自动备份
+                self.triggerAutoBackupIfNeeded(for: card)
+            }
+        }
+    }
+    
+    /// 在卡片实际加入 connectedCards 后调用，避免竞态导致只备份 DCIM
+    private func triggerAutoBackupIfNeeded(for card: ConnectedCard) {
+        let userDefaults = UserDefaults.standard
+        if userDefaults.object(forKey: "autoBackupOnMount") == nil {
+            userDefaults.set(true, forKey: "autoBackupOnMount")
+        }
+        let isAutoBackup = userDefaults.bool(forKey: "autoBackupOnMount")
+        let isTrusted = trustedDeviceIDs.contains(card.url.lastPathComponent)
+        
+        guard isAutoBackup && isTrusted else { return }
+        
+        if !card.selectedSourcePaths.isEmpty {
+            let urls = card.selectedSourcePaths.map { URL(fileURLWithPath: $0) }
+            startBackupProcess(volumeURL: card.url, sourceURLs: urls)
+        } else {
+            let dcimURL = card.url.appendingPathComponent("DCIM")
+            var isDir: ObjCBool = false
+            if FileManager.default.fileExists(atPath: dcimURL.path, isDirectory: &isDir) && isDir.boolValue {
+                startBackupProcess(volumeURL: card.url, sourceURLs: [dcimURL])
             }
         }
     }
@@ -357,27 +395,7 @@ class BackupManager: ObservableObject {
     
     private func handleMountEvent(volumeURL: URL) {
         if isPotentialMemoryCard(at: volumeURL) {
-            self.addCard(url: volumeURL)
-            
-            let userDefaults = UserDefaults.standard
-            if userDefaults.object(forKey: "autoBackupOnMount") == nil {
-                userDefaults.set(true, forKey: "autoBackupOnMount")
-            }
-            let isAutoBackup = userDefaults.bool(forKey: "autoBackupOnMount")
-            let isTrusted = trustedDeviceIDs.contains(volumeURL.lastPathComponent)
-            
-            if isAutoBackup && isTrusted {
-                if let idx = self.connectedCards.firstIndex(where: { $0.url == volumeURL }), !self.connectedCards[idx].selectedSourcePaths.isEmpty {
-                    let urls = self.connectedCards[idx].selectedSourcePaths.map { URL(fileURLWithPath: $0) }
-                    startBackupProcess(volumeURL: volumeURL, sourceURLs: urls)
-                } else {
-                    let dcimURL = volumeURL.appendingPathComponent("DCIM")
-                    var isDir: ObjCBool = false
-                    if FileManager.default.fileExists(atPath: dcimURL.path, isDirectory: &isDir) && isDir.boolValue {
-                        startBackupProcess(volumeURL: volumeURL, sourceURLs: [dcimURL])
-                    }
-                }
-            }
+            self.addCard(url: volumeURL) // 自动备份逻辑已移入 addCard，卡片实际添加后再触发
         }
         
         let userDefaults = UserDefaults.standard
@@ -424,7 +442,7 @@ class BackupManager: ObservableObject {
         return fallbackPath
     }
     
-    private func startBackupProcess(volumeURL: URL, sourceURLs: [URL]) {
+    func startBackupProcess(volumeURL: URL, sourceURLs: [URL]) {
         let targetPath = UserDefaults.standard.string(forKey: "targetBackupPath") ?? ""
         let isTargetAvailable = !targetPath.isEmpty && FileManager.default.fileExists(atPath: targetPath)
         let fallbackPath = getFallbackPath()
@@ -439,7 +457,37 @@ class BackupManager: ObservableObject {
             return
         }
         
+        // 建议7: 备份前检查目标空间是否足够
         let sourceName = volumeURL.lastPathComponent
+        var totalSourceSize: UInt64 = 0
+        for srcURL in sourceURLs {
+            if let enumerator = FileManager.default.enumerator(at: srcURL, includingPropertiesForKeys: [.fileSizeKey], options: [.skipsHiddenFiles]) {
+                for case let fileURL as URL in enumerator {
+                    if let size = try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize {
+                        totalSourceSize += UInt64(size)
+                    }
+                }
+            }
+        }
+        
+        let destURL = URL(fileURLWithPath: destination)
+        if let destValues = try? destURL.resourceValues(forKeys: [.volumeAvailableCapacityKey]),
+           let availableCapacity = destValues.volumeAvailableCapacity {
+            let freeBytes = UInt64(availableCapacity)
+            // 源大小的 1.1 倍作为安全余量（考虑 --backup 保留旧文件）
+            let requiredBytes = totalSourceSize + totalSourceSize / 10
+            if freeBytes < requiredBytes {
+                let freeGB = Double(freeBytes) / 1_000_000_000
+                let needGB = Double(requiredBytes) / 1_000_000_000
+                let msg = String(format: "⚠️ 目标空间不足: 需要 %.1f GB，仅剩 %.1f GB", needGB, freeGB)
+                DispatchQueue.main.async {
+                    self.sendNotification(titleKey: "appName", body: "\(sourceName) \(msg)", isSuccess: false)
+                    self.addLog(BackupLog(date: Date(), sourceName: sourceName, destinationPath: destination, dataTransferredStr: "0 MB", fileCount: 0, durationSeconds: 0, result: "空间不足 (需\(String(format: "%.1f", needGB))GB，剩\(String(format: "%.1f", freeGB))GB)"))
+                }
+                return
+            }
+        }
+        
         self.runRsync(sources: sourceURLs.map { $0.path }, destination: destination, actionNameKey: "working", sourceName: sourceName, isMigrating: false, sourceVolumeURL: volumeURL)
     }
     
@@ -535,7 +583,25 @@ class BackupManager: ObservableObject {
                     }
                 }
                 dryRunProcess.waitUntilExit()
-            } catch { print("Dry run failed: \(error)") }
+                
+                let dryExitCode = dryRunProcess.terminationStatus
+                if dryExitCode != 0 {
+                    DispatchQueue.main.async {
+                        self.isWorking = false
+                        self.sendNotification(titleKey: "appName", body: "⚠️ \(sourceName) 备份预检失败 (Exit: \(dryExitCode))，请检查存储卡连接。", isSuccess: false)
+                        self.addLog(BackupLog(date: Date(), sourceName: sourceName, destinationPath: destination, dataTransferredStr: "0 MB", fileCount: 0, durationSeconds: 0, result: "预检失败 (Exit: \(dryExitCode))"))
+                    }
+                    return
+                }
+            } catch { 
+                print("Dry run failed: \(error)")
+                DispatchQueue.main.async {
+                    self.isWorking = false
+                    self.sendNotification(titleKey: "appName", body: "⚠️ \(sourceName) 备份预检失败: \(error.localizedDescription)", isSuccess: false)
+                    self.addLog(BackupLog(date: Date(), sourceName: sourceName, destinationPath: destination, dataTransferredStr: "0 MB", fileCount: 0, durationSeconds: 0, result: "预检异常"))
+                }
+                return
+            }
             
             if totalFilesToTransfer == 0 {
                 DispatchQueue.main.async {
@@ -654,6 +720,12 @@ class BackupManager: ObservableObject {
                 self.isWorking = false
                 self.currentProcess = nil
                 self.currentSourceVolumeURL = nil
+                
+                // 排队机制：当前任务完成后，自动开始下一个
+                if !self.backupQueue.isEmpty {
+                    let next = self.backupQueue.removeFirst()
+                    self.startBackupProcess(volumeURL: next.volumeURL, sourceURLs: next.sourceURLs)
+                }
             }
         }
     }
