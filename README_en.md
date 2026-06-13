@@ -58,21 +58,9 @@ A lock file prevents concurrent backups to the same destination. A state file tr
 
 Full log of all backup attempts with timestamp, source device, destination, file count, data size, duration, and status. Export to CSV for record keeping.
 
-### Auto Update Check
-
-Checks GitHub Releases once per day. If a new version is available, a notice appears in the settings page.
-
-### Launch at Login
-
-Uses macOS ServiceManagement framework for native login item registration. No third-party dependencies.
-
 ### Card Renaming
 
 Assign custom names to your storage cards for easier identification in the menu bar and settings.
-
-### Dual Language
-
-Full support for Simplified Chinese and English. Switch instantly from the settings page.
 
 ---
 
