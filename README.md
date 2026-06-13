@@ -1,5 +1,7 @@
 # SDBackup
 
+English | [中文](README.zh-CN.md)
+
 macOS menu bar application for automatic SD card backup. Designed for photographers and videographers who need reliable, hands-free transfer of photos and videos from camera storage cards to their Mac.
 
 ## Features
